@@ -1,0 +1,52 @@
+---
+title: "Combine metadata"
+output: html_document
+date: "2023-11-28"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Overview
+
+Here I have to combine metadata (clinical variables etc) with metadata from the microbiology results. This will enable downstream analysis of the presence and abundance of the probiotic species in the samples we have.
+
+```{r read data, echo=FALSE, message=FALSE}
+
+metadata <- read.csv("../../data/metadata/PRINCESS_metadata.txt",
+                     header=TRUE,
+                     stringsAsFactors = FALSE,
+                     sep="\t")
+
+micro <- read.csv("../../data/metadata/PRINCESS_Microbiology.csv",
+                  header=TRUE,
+                  stringsAsFactors=FALSE,
+                  sep=",")
+
+
+# Number that we have microbiology for
+# based on New_PID column
+nmicro <- length(intersect(micro$New_PID, metadata$New_PID))
+```
+
+In total we have `r nmicro` samples that have both microbiome sequencing and microbiology information for.
+
+```{r merge the data, echo=FALSE, message=FALSE}
+
+# only keep the microbiology for the samples that we have metadata
+# for
+metadata_merged <- merge(metadata, micro, by.x="New_PID", by.y="New_PID", all.x=TRUE, all.y=FALSE)
+
+# write out the table
+write.table(metadata_merged,
+            file = "export.dir/metadata_micro_merged.tsv",
+            row.names=FALSE,
+            quote=FALSE,
+            sep="\t")
+
+```
+
+

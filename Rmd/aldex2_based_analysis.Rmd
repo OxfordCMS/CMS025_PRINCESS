@@ -1,0 +1,188 @@
+---
+title: "CMS025: Impact of a daily oral probiotic combination and antibiotic exposure on the gut microbiome of UK care home residents: secondary analysis of a randomised placebo-controlled trial"
+output: html_document
+date: "2023-10-04"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+options(bitmapType = "cairo")
+```
+
+```{r load libraries, echo=FALSE, message=FALSE}
+
+library(ggplot2)
+library(RSQLite)
+#library(dplyr)
+library(phyloseq)
+#library(dplyr)
+library(OCMSutility)
+library(lme4)
+library(ALDEx2)
+library(propr)
+library(NetCoMi)
+
+```
+
+
+# Overview
+
+This analysis is concerned with doing differential abundance testing using Aldex2 - we are always plagued with zeros in these types of analyses. I suspect it won't be much different to the results of DESeq2 but for visualisation the clr is often a nicer way to present as the zeros are imputed.
+
+```{r read data, echo=FALSE, message=FALSE}
+
+# read asv counts table
+asv <- read.csv("~/work/CMS025/export/CMS025/data/taxa_abundances.tsv",
+                header = TRUE,
+                stringsAsFactors = FALSE,
+                row.names=1,
+                sep = "\t")
+
+# remove the filtered and trimmed bits and bobs
+colnames(asv) <- gsub("filtered\\.trimmed\\.", "", colnames(asv))
+
+# read metadata
+metadata <- read.csv("../../data/metadata/PRINCESS_metadata.txt",
+                     header = TRUE,
+                     stringsAsFactors = FALSE,
+                     sep="\t",
+                     row.names = 1)
+
+# remove filtered and trimmed bits from rownames
+rownames(metadata) <- sub("filtered-trimmed-", "", rownames(metadata))
+
+# check colnames and rownames match and
+# re-order
+if(!(setequal(rownames(metadata), colnames(asv)))){
+  metadata <- metadata[colnames(asv),]
+}
+
+
+# The community standard is still in here so take this out
+metadata <- metadata[rownames(metadata) != "ZymobiomicsDNAStandard",]
+asv <- asv[,colnames(asv) != "ZymobiomicsDNAStandard"]
+
+
+# There are missing patient ids so presumably these need to go
+metadata <- metadata[!(is.na(metadata$New_PID)),]
+asv <- asv[,rownames(metadata)]
+
+
+```
+
+```{r get genus level data, echo=FALSE, message=FALSE}
+
+# aggregate counts at the genus level
+genera <- gsub("ASV[0-9].*:", "", rownames(asv))
+genera <- gsub(";s__.*", "", genera)
+
+genus_counts <- aggregate(asv, by=list(as.factor(genera)), FUN="sum")
+rownames(genus_counts) <- genus_counts$Group.1
+genus_counts <- genus_counts[,2:ncol(genus_counts)]
+
+# Remove genera that are NA at genus level
+genus_counts <- genus_counts[grep("g__NA", rownames(genus_counts), invert=TRUE),]
+
+```
+
+
+### Baseline Aldex2
+
+This analysis is to see whether we can detect differences between allocation groups at baseline. There certainly shouldn't be any differences but if there are they could impact on downstream interpretation.
+
+```{r baseline deseq, echo=FALSE, message=FALSE}
+
+meta_baseline <- metadata[metadata$Timepoint == "Baseline",]
+genus_counts_baseline <- genus_counts[,rownames(meta_baseline)]
+
+genera_to_keep <- rownames(genus_counts_baseline[rowSums(genus_counts_baseline > 0.01) > 25,])
+
+conditions <- meta_baseline$Allocationcode
+aldex_baseline <- aldex(genus_counts_baseline, conditions)
+
+aldex_sig_baseline <- aldex_baseline[aldex_baseline$wi.eBH < 0.05,]
+
+```
+
+## Associations with Abx exposure {.tabset .tabset-pills}
+
+Here I am splitting the analysis into two - one looking at the placebo group and the other looking at the probiotic group. This is based on observations of alterations in alpha diversity specifically in the probiotic group but not in the placebo group.
+
+### Differential abundance ~ ABX exposure
+
+```{r split data into placebo and probiotic, echo=FALSE, message=FALSE}
+
+# split by placebo and probiotic (only looking at three months)
+meta_placebo <- metadata[metadata$Timepoint == "Three-months" & metadata$Allocationcode == "placebo",]
+meta_probiotic <- metadata[metadata$Timepoint == "Three-months" & metadata$Allocationcode == "probiotic",]
+
+meta_abs_aldex <- metadata[c(rownames(meta_placebo), rownames(meta_probiotic)),]
+genus_counts <- genus_counts[, rownames(meta_abs_aldex)]
+
+genus_counts <- genus_counts[rowSums(genus_counts > 0) > ncol(genus_counts)/4,]
+
+genus_placebo <- genus_counts[genera_to_keep, rownames(meta_placebo)]
+genus_probiotic <- genus_counts[genera_to_keep, rownames(meta_probiotic)]
+
+
+placebo_colors <- RColorBrewer::brewer.pal(5, "BuPu")
+placebo_colors <- c("Exposed to antibiotics" = placebo_colors[5],
+                    "Not exposed to antibiotics" = placebo_colors[2])
+
+probiotic_colors <- RColorBrewer::brewer.pal(5, "Reds")
+probiotic_colors <- c("Exposed to antibiotics" = probiotic_colors[5],
+                    "Not exposed to antibiotics" = probiotic_colors[2])
+
+
+conditions_placebo <- meta_placebo$ABXEXPOSED_3M
+conditions_probiotic <- meta_probiotic$ABXEXPOSED_3M
+
+# probiotic vs placebo only
+meta_pro_pla <- metadata[metadata$Timepoint == "Three-months" & metadata$ABXEXPOSED_3M == "Not exposed to antibiotics",]
+conditions_pro_vs_pla <- meta_pro_pla$Allocationcode
+genus_pro_pla <- genus_counts[,rownames(meta_pro_pla)]
+
+aldex_placebo <- aldex(genus_placebo, conditions = conditions_placebo)
+aldex_probiotic <- aldex(genus_probiotic, conditions = conditions_probiotic)
+aldex_pro_pla <- aldex(genus_pro_pla, conditions = conditions_pro_vs_pla)
+
+
+aldex_placebo <- aldex_placebo[order(aldex_placebo$wi.eBH, decreasing=FALSE),]
+aldex_probiotic <- aldex_probiotic[order(aldex_probiotic$wi.eBH, decreasing=FALSE),]
+aldex_pro_pla <- aldex_pro_pla[order(aldex_pro_pla$wi.eBH, decreasing=FALSE),]
+
+write.table(data.frame(feature = rownames(aldex_placebo), aldex_placebo),
+            file="export.dir/aldex_placebo.tsv",
+            row.names=FALSE,
+            quote=FALSE,
+            sep="\t")
+
+write.table(data.frame(feature = rownames(aldex_probiotic), aldex_probiotic),
+            file="export.dir/aldex_probiotic.tsv",
+            row.names=FALSE,
+            quote=FALSE,
+            sep="\t")
+
+write.table(data.frame(feature = rownames(aldex_pro_pla), aldex_pro_pla),
+            file="export.dir/aldex_probiotic_vs_placebo.tsv",
+            row.names=FALSE,
+            quote=FALSE,
+            sep="\t")
+
+
+
+
+
+aldex_sig_placebo <- aldex_placebo[aldex_placebo$wi.ep < 0.05,]
+aldex_sig_probiotic <- aldex_probiotic[aldex_probiotic$wi.ep < 0.05,]
+aldex_sig_pro_pla <- aldex_pro_pla[aldex_pro_pla$wi.ep < 0.05,]
+
+
+
+```
+
+
+
+

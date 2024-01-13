@@ -1,0 +1,1572 @@
+---
+title: "CMS025: Impact of a daily oral probiotic combination and antibiotic exposure on the gut microbiome of UK care home residents: secondary analysis of a randomised placebo-controlled trial"
+output: html_document
+date: "2023-10-04"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+options(bitmapType = "cairo")
+```
+
+```{r load libraries, echo=FALSE, message=FALSE}
+
+library(ggplot2)
+library(RSQLite)
+#library(dplyr)
+library(phyloseq)
+#library(dplyr)
+library(OCMSutility)
+library(lme4)
+library(DESeq2)
+library(ggtree)
+library(propr)
+library(NetCoMi)
+
+```
+
+```{r color mappings, echo=FALSE, message=FALSE}
+
+# colors
+group_colors <- c("Placebo; Abx" = placebo_colors[["Exposed to antibiotics"]],
+                  "Placebo; No abx" = placebo_colors[["Not exposed to antibiotics"]],
+                  "Probiotic; Abx" = probiotic_colors[["Exposed to antibiotics"]],
+                  "Probiotic; No abx" = probiotic_colors[["Not exposed to antibiotics"]])
+
+# for resulting figures
+dir.create("export.dir/figures")
+
+```
+
+
+# Overview
+
+This project is looking at the effects and associations of daily probiotic intake (Lactobacillus rhamnosus GG + Bifidobacterium animalis subsp lactis BB-12) with microbiome alterations in the presence and absence of antibiotic exposure in a care home setting.
+
+```{r read data, echo=FALSE, message=FALSE}
+
+# read asv counts table
+asv <- read.csv("~/work/CMS025/export/CMS025/data/taxa_abundances.tsv",
+                header = TRUE,
+                stringsAsFactors = FALSE,
+                row.names=1,
+                sep = "\t")
+
+# remove the filtered and trimmed bits and bobs
+colnames(asv) <- gsub("filtered\\.trimmed\\.", "", colnames(asv))
+
+# read metadata
+metadata <- read.csv("../../data/metadata/PRINCESS_metadata.txt",
+                     header = TRUE,
+                     stringsAsFactors = FALSE,
+                     sep="\t",
+                     row.names = 1)
+
+# remove filtered and trimmed bits from rownames
+rownames(metadata) <- sub("filtered-trimmed-", "", rownames(metadata))
+
+# check colnames and rownames match and
+# re-order
+if(!(setequal(rownames(metadata), colnames(asv)))){
+  metadata <- metadata[colnames(asv),]
+}
+
+
+# The community standard is still in here so take this out
+metadata <- metadata[rownames(metadata) != "ZymobiomicsDNAStandard",]
+asv <- asv[,colnames(asv) != "ZymobiomicsDNAStandard"]
+
+
+# There are missing patient ids so presumably these need to go
+metadata <- metadata[!(is.na(metadata$New_PID)),]
+asv <- asv[,rownames(metadata)]
+
+
+```
+
+## Sample information
+
+Useful to see which participants we have data for over the timepoints.
+
+```{r metadata evaluation, echo=FALSE, message=FALSE}
+
+missing <- nsample_by_var(metadata, 'New_PID', c('Timepoint'))
+
+knitr::kable(data.frame("Total" = nrow(missing),
+                        "One TP" = nrow(missing[missing$Timepoint == 1,]),
+                        "Two TPs" = nrow(missing[missing$Timepoint == 2,])))
+
+```
+
+
+## Abundance of Lactobacillus and Bifidobacterium {.tabset .tabset-pills}
+
+The first question is whether we see increased abundance of the bacteria that are present in the probiotic in the group of individuals that received probiotic. With these data it is only really possible at the genus level - culturing has been performed previously so this is just a bit of a check that everything is as it should be.
+
+
+### Increases over time {.tabset .tabset-pills}
+
+This is performed in those individuals that have two timepoints so we can see if there is an increase post-intervention.
+
+
+```{r probiotic relabs, echo=FALSE, message=FALSE}
+
+# aggregate counts at the genus level
+genera <- gsub("ASV[0-9].*:", "", rownames(asv))
+genera <- gsub(";s__.*", "", genera)
+
+genus_counts <- aggregate(asv, by=list(as.factor(genera)), FUN="sum")
+rownames(genus_counts) <- genus_counts$Group.1
+genus_counts <- genus_counts[,2:ncol(genus_counts)]
+
+# Remove genera that are NA at genus level
+genus_counts <- genus_counts[grep("g__NA", rownames(genus_counts), invert=TRUE),]
+
+# aggregate counts at the species level
+species <- gsub("ASV[0-9].*:", "", rownames(asv))
+
+species_counts <- aggregate(asv, by=list(as.factor(species)), FUN="sum")
+rownames(species_counts) <- species_counts$Group.1
+species_counts <- species_counts[,2:ncol(species_counts)]
+
+# subset for those that have both timepoints
+subjects <- missing$New_PID[missing$Timepoint == 2]
+
+# subset metadata for subjects with both timepoints
+metadata_both <- metadata[metadata$New_PID %in% subjects,]
+
+# subset genus abundances for individuals with both
+# timepoints
+genus_both <- genus_counts[,rownames(metadata_both)]
+genus_both_relab <- relab(genus_both)
+
+# subset species abundances for individuals with both
+# timepoints
+species_both <- species_counts[,rownames(metadata_both)]
+species_both_relab <- relab(species_both)
+
+to_plot_probiotics <- data.frame(Lactobacillus = unlist(genus_both_relab["k__Bacteria;p__Firmicutes;c__Bacilli;o__Lactobacillales;f__Lactobacillaceae;g__Lactobacillus",]),
+                              Bifidobacterium =unlist(genus_both_relab["k__Bacteria;p__Actinobacteria;c__Actinobacteria;o__Bifidobacteriales;f__Bifidobacteriaceae;g__Bifidobacterium",]),
+                                 Abx = metadata_both$ABXEXPOSED_3M,
+                                 Timepoint = metadata_both$Timepoint,
+                                 Probiotic = metadata_both$Allocationcode,
+                                 PID = metadata_both$New_PID)
+
+p_l <- ggplot(to_plot_probiotics, aes(x=Timepoint, y=Lactobacillus, group=PID)) +
+  geom_point() +
+  geom_line() +
+  theme_classic() +
+  facet_wrap(~Probiotic) 
+  
+p_b <- ggplot(to_plot_probiotics, aes(x=Timepoint, y=Bifidobacterium, group=PID)) +
+  geom_point() +
+  geom_line() +
+  theme_classic() +
+  facet_wrap(~Probiotic)
+
+p <- gridExtra::grid.arrange(p_l, p_b, nrow=2)
+
+ggsave(plot=p, "export.dir/figures/probiotic_abundances.pdf", height=6, width=6)
+
+```
+
+There isn't a clear difference in the probiotic group relative to the placebo group but we should look at the signficance.
+
+
+#### Relative abundance
+
+```{r significance in probiotic genera, echo=FALSE, message=FALSE}
+
+
+# Probiotic group
+pro <- to_plot_probiotics[to_plot_probiotics$Probiotic == "probiotic",]
+pro_base <- pro[pro$Timepoint == "Baseline",]
+pro_3m <- pro[pro$Timepoint == "Three-months",]
+
+pro_lacto <- wilcox.test(pro_base$Lactobacillus, pro_3m$Lactobacillus, paired = TRUE, alternative = "two.sided")
+
+pro_bifido <- wilcox.test(pro_base$Bifidobacterium, pro_3m$Bifidobacterium, paired = TRUE, alternative = "two.sided")
+
+
+# Placebo group
+pla <- to_plot_probiotics[to_plot_probiotics$Probiotic == "placebo",]
+
+pla_base <- pla[pla$Timepoint == "Baseline",]
+pla_3m <- pla[pla$Timepoint == "Three-months",]
+
+pla_lacto <- wilcox.test(pla_base$Lactobacillus, pla_3m$Lactobacillus, paired = TRUE, alternative = "two.sided")
+
+pla_bifido <- wilcox.test(pla_base$Bifidobacterium, pla_3m$Bifidobacterium, paired = TRUE, alternative = "two.sided")
+
+pro_lacto
+pro_bifido
+
+pla_lacto
+pla_bifido
+
+```
+
+#### Presence/absence
+
+There doesn't seem to be a difference between relative abundance between baseline and three-months in the probiotic group. Is there a change in presence vs. absence? In the original trial paper 3 month samples were more likely to contain cultures of these bacteria.
+
+```{r presence_absence, echo=FALSE, message=FALSE}
+
+to_plot_probiotics$Lacto_presence <- ifelse(to_plot_probiotics$Lactobacillus > 0, 1, 0)
+to_plot_probiotics$Bifido_presence <- ifelse(to_plot_probiotics$Bifidobacterium > 0, 1, 0)
+
+contingency <- table(to_plot_probiotics[to_plot_probiotics$Timepoint == "Three-months",]$Lacto_presence, to_plot_probiotics[to_plot_probiotics$Timepoint == "Three-months",]$Probiotic)
+
+contingency_df <- as.data.frame(contingency) 
+
+ggplot(contingency_df, aes(x=Var2, y=Freq, fill=Var1)) +
+  geom_bar(stat="identity") +
+  theme_classic() +
+  scale_fill_manual(values = c(blues9[3], blues9[8])) +
+  ggtitle("Three-months post treatment")
+
+fisher.test(contingency)
+
+```
+
+### Difference between groups
+
+The other way to look at this is to compare placebo vs probiotic groups. There are more individual samples for this comparison so may give us more power.
+
+```{r probiotic genera by group, echo=FALSE, message=FALSE}
+
+genus_clr <- OCMSutility::clr(genus_counts)
+
+metadata$Lactobacillus <- unlist(genus_clr["k__Bacteria;p__Firmicutes;c__Bacilli;o__Lactobacillales;f__Lactobacillaceae;g__Lactobacillus",])
+
+metadata$Bifidobacterium <- unlist(genus_clr["k__Bacteria;p__Actinobacteria;c__Actinobacteria;o__Bifidobacteriales;f__Bifidobacteriaceae;g__Bifidobacterium",])
+
+# baseline lacto
+p_lacto_base <- ggplot(metadata[metadata$Timepoint == "Baseline",], aes(x=Allocationcode, y=Lactobacillus)) +
+  geom_boxplot(outlier.alpha=0) +
+  geom_jitter(height=0, width=0.1) +
+  theme_classic() +
+  ggpubr::stat_compare_means()
+
+# 3 month lacto
+p_lacto_3m <- ggplot(metadata[metadata$Timepoint == "Three-months",], aes(x=Allocationcode, y=Lactobacillus)) +
+  geom_boxplot(outlier.alpha=0) +
+  geom_jitter(height=0, width=0.1) +
+  theme_classic() +
+  ggpubr::stat_compare_means() 
+
+
+# baseline bifido
+p_bifido_base <- ggplot(metadata[metadata$Timepoint == "Baseline",], aes(x=Allocationcode, y=Bifidobacterium)) +
+  geom_boxplot(outlier.alpha=0) +
+  geom_jitter(height=0, width=0.1) +
+  theme_classic() +
+  ggpubr::stat_compare_means()
+
+# 3 month bifido
+p_bifido_3m <- ggplot(metadata[metadata$Timepoint == "Three-months",], aes(x=Allocationcode, y=Bifidobacterium)) +
+  geom_boxplot(outlier.alpha=0) +
+  geom_jitter(height=0, width=0.1) +
+  theme_classic() +
+  ggpubr::stat_compare_means() 
+
+
+gridExtra::grid.arrange(p_lacto_3m, p_bifido_3m, nrow=1)
+
+```
+
+### Microbiology results {.tabset .tabset-pills}
+
+We have results from culturing for a subset of patients and so we can also look at this. It will never be that clear from 16S analysis so maybe the culturing will be more clear cut.
+
+```{r culturing analysis, echo=FALSE, message=FALSE}
+
+# read in the metadata
+micro <- read.csv("export.dir/metadata_micro_merged.tsv",
+                  sep = "\t",
+                  stringsAsFactors = FALSE)
+
+# rename sample ID in micro file
+micro$sampleID <- sub("filtered-trimmed-", "", micro$sampleID)
+rownames(micro) <-micro$sampleID
+
+# order the same as metadata og
+micro <- micro[rownames(metadata),]
+
+```
+
+#### Lactobacillus changes over time
+
+For patients that we have both timepoints for we see if there is an increase in the probiotic species over time in the probiotic group.
+
+```{r micro over time, echo=FALSE, message=FALSE}
+
+# can get the subjects from the previous analysis
+culturing <- micro[micro$New_PID %in% subjects,]
+
+# need to change the data to long format
+lacto_cult <- culturing[,c("New_PID",
+                           "sampleID",
+                           "Timepoint",
+                           "Allocationcode",
+                           "ABXEXPOSED_3M",
+                           "Alloc_Abx",
+                           "LACTRHA_BL",
+                           "LACTRHACC_BL",
+                           "LACTRHA_03",
+                           "LACTRHACC_03")]
+
+lacto_bl <- lacto_cult[lacto_cult$Timepoint == "Baseline",]
+lacto_3m <- lacto_cult[lacto_cult$Timepoint == "Three-months",]
+
+# presence/absence
+lacto_pa_bl <- lacto_bl[c(1,2,3,4,5,6,7,8)]
+lacto_pa_3m <- lacto_3m[c(1,2,3,4,5,6,9,10)]
+colnames(lacto_pa_bl)[7] <- "LACTORHA"
+colnames(lacto_pa_3m)[7] <- "LACTORHA"
+
+colnames(lacto_pa_bl)[8] <- "LACTORHACC"
+colnames(lacto_pa_3m)[8] <- "LACTORHACC"
+
+lacto_pa <- dplyr::bind_rows(lacto_pa_bl, lacto_pa_3m)
+
+# make -8 NA
+lacto_pa$LACTORHA[lacto_pa$LACTORHA == -8] <- NA
+
+lacto_pa_to_plot <- as.data.frame(table(lacto_pa$LACTORHA, lacto_pa$Timepoint, lacto_pa$Allocationcode))
+
+ggplot(lacto_pa_to_plot, aes(x=Var2, y=Freq, fill = Var1)) +
+  geom_bar(stat="identity", position="fill") +
+  theme_classic() +
+  facet_wrap(~Var3) +
+  scale_fill_manual(values = c("grey", "slategrey")) +
+  ggtitle(expression(italic("Lactobacillus Rhamnosus")))
+ggsave(file = "export.dir/lactobacillus_culture.pdf", height=3, width=6)
+
+
+# test significance
+placebo_sig <- fisher.test(table(lacto_pa[lacto_pa$Allocationcode == "placebo",]$LACTORHA,
+                                 lacto_pa[lacto_pa$Allocationcode == "placebo",]$Timepoint))
+
+probiotic_sig <- fisher.test(table(lacto_pa[lacto_pa$Allocationcode == "probiotic",]$LACTORHA,
+                                   lacto_pa[lacto_pa$Allocationcode == "probiotic",]$Timepoint))
+
+cat("Placebo group\n")
+print(placebo_sig)
+
+cat("Probiotic group\n")
+print(probiotic_sig)
+```
+
+
+#### Bifidobacterium changes over time
+
+For patients that we have both timepoints for we see if there is an increase in the probiotic species over time in the probiotic group.
+
+```{r bifido over time, echo=FALSE, message=FALSE}
+
+# need to change the data to long format
+bifido_cult <- culturing[,c("New_PID",
+                           "sampleID",
+                           "Timepoint",
+                           "Allocationcode",
+                           "ABXEXPOSED_3M",
+                           "Alloc_Abx",
+                           "BIFIBANSL_BL",
+                           "BIFIBANSLCC_BL",
+                           "BIFIBANSL_03",
+                           "BIFIBANSLCC_03")]
+
+bifido_bl <- bifido_cult[bifido_cult$Timepoint == "Baseline",]
+bifido_3m <- bifido_cult[bifido_cult$Timepoint == "Three-months",]
+
+# presence/absence
+bifido_pa_bl <- bifido_bl[c(1,2,3,4,5,6,7,8)]
+bifido_pa_3m <- bifido_3m[c(1,2,3,4,5,6,9,10)]
+colnames(bifido_pa_bl)[7] <- "BIFIBANSL"
+colnames(bifido_pa_3m)[7] <- "BIFIBANSL"
+colnames(bifido_pa_bl)[8] <- "BIFIBANSLCC"
+colnames(bifido_pa_3m)[8] <- "BIFIBANSLCC"
+
+bifido_pa <- dplyr::bind_rows(bifido_pa_bl, bifido_pa_3m)
+
+# make -8 NA
+bifido_pa$BIFIBANSL[bifido_pa$BIFIBANSL == -8] <- NA
+
+bifido_pa_to_plot <- as.data.frame(table(bifido_pa$BIFIBANSL, bifido_pa$Timepoint, bifido_pa$Allocationcode))
+
+ggplot(bifido_pa_to_plot, aes(x=Var2, y=Freq, fill = Var1)) +
+  geom_bar(stat="identity", position="fill") +
+  theme_classic() +
+  facet_wrap(~Var3)  +
+  scale_fill_manual(values = c("grey", "slategrey")) +
+  ggtitle(expression(italic("Bifidobacterium animalis")))
+ggsave(file = "export.dir/bifidobacterium_culture.pdf", height=3, width=6)
+
+# test significance
+placebo_bifi_sig <- fisher.test(table(bifido_pa[bifido_pa$Allocationcode == "placebo",]$BIFIBANSL,
+                                      bifido_pa[bifido_pa$Allocationcode == "placebo",]$Timepoint))
+
+probiotic_bifi_sig <- fisher.test(table(bifido_pa[bifido_pa$Allocationcode == "probiotic",]$BIFIBANSL,
+                                        bifido_pa[bifido_pa$Allocationcode == "probiotic",]$Timepoint))
+
+cat("Placebo group\n")
+print(placebo_bifi_sig)
+
+cat("Probiotic group\n")
+print(probiotic_bifi_sig)
+```
+
+
+### Compare culturing with sequencing {.tabset .tabset-pills}
+
+#### Lactobacillus
+
+```{r comparison lacto, echo=FALSE, message=FALSE}
+colnames(genus_clr) <- gsub("X", "", colnames(genus_clr))
+samples_sub <- intersect(rownames(lacto_pa), colnames(genus_clr))
+genus_clr_sub <- genus_clr[,samples_sub]
+
+lacto_sub <- lacto_pa[samples_sub,]
+lacto_sub$LACTO_SEQ <- unlist(genus_clr_sub["k__Bacteria;p__Firmicutes;c__Bacilli;o__Lactobacillales;f__Lactobacillaceae;g__Lactobacillus",])
+ 
+lacto_sub$LACTORHACC[lacto_sub$LACTORHACC == -8] <- 0
+ggplot(lacto_sub, aes(x = log10(LACTORHACC), y = LACTO_SEQ)) +
+  geom_point() +
+  theme_classic() +
+  stat_smooth(method="lm", se=FALSE) +
+  ggpubr::stat_cor() +
+  xlab("log10(Coloncy count)") +
+  ylab("Lactobacillus (CLR)")
+ggsave(file = "export.dir/lactobacillus_culture_scatter.pdf", height=3, width=3)
+
+```
+
+
+#### Bifidobacterium
+
+```{r compare bifido, echo=FALSE, message=FALSE}
+
+samples_sub <- intersect(rownames(bifido_pa), colnames(genus_clr))
+genus_clr_sub <- genus_clr[,samples_sub]
+
+bifido_sub <- bifido_pa[samples_sub,]
+bifido_sub$BIFIDO_SEQ <- unlist(genus_clr_sub["k__Bacteria;p__Actinobacteria;c__Actinobacteria;o__Bifidobacteriales;f__Bifidobacteriaceae;g__Bifidobacterium",])
+
+bifido_sub$BIFIBANSLCC[bifido_sub$BIFIBANSLCC == -8] <- 0
+ggplot(bifido_sub, aes(x = log10(BIFIBANSLCC), y = BIFIDO_SEQ)) +
+  geom_point() +
+  theme_classic() +
+  stat_smooth(method="lm", se=FALSE) +
+  ggpubr::stat_cor() +
+  xlab("log10(Coloncy count)") +
+  ylab("Bifidobacterium (CLR)")
+ggsave(file = "export.dir/bifidobacterium_culture_scatter.pdf", height=3, width=3)
+
+```
+
+
+
+## Numbers at each level
+
+```{r numbers at each level, echo=FALSE, message=FALSE}
+
+# get taxon names
+taxa <- gsub("(ASV[0-9]*):", "", rownames(asv))
+genera <- gsub("(s__.*)", "", taxa)
+genera <- genera[grep("g__NA", genera, invert=TRUE)]
+
+families <- gsub("(g__.*)", "", taxa)
+families <- families[grep("f__NA", families, invert=TRUE)]
+
+orders <- gsub("(f__.*)", "", taxa)
+orders <- orders[grep("o__NA", orders, invert=TRUE)]
+
+classes <- gsub("(o__.*)", "", taxa)
+classes <- classes[grep("c__NA", classes, invert=TRUE)]
+
+phyla <- gsub("(c__.*)", "", taxa)
+phyla <- families[grep("p__NA", phyla, invert=TRUE)]
+
+
+number_at_level <- data.frame(level = c("genus",
+                                        "family",
+                                        "order",
+                                        "class",
+                                        "phylum"),
+                              n = c(length(unique(genera)),
+                                    length(unique(families)),
+                                    length(unique(orders)),
+                                    length(unique(classes)),
+                                    length(unique(phyla))))
+knitr::kable(number_at_level)
+
+```
+
+
+## Phylum barplot
+
+The overall characteristics of the microbiome can be presented at the phylum level faceted by timepoint and treatment arm.
+
+```{r phylum barplot, echo=FALSE, message=FALSE}
+
+asv <- asv[grep("k__Bacteria", rownames(asv)),]
+
+# Remove chloroplasts etc
+asv <- asv[grep("Cyanobacteria/Chloroplast", rownames(asv), invert=TRUE),]
+asv <- asv[grep("p__NA", rownames(asv), invert=TRUE),]
+
+phyla <- gsub("ASV[0-9]*:", "", rownames(asv))
+phyla <- gsub("(k__.*);p__", "", phyla)
+phyla <- gsub("(c__.*)", "", phyla)
+phyla <- gsub(";", "", phyla)
+
+# aggregate by phylum counts
+phylum_counts <- aggregate(asv, by=list(as.factor(phyla)), FUN="sum")
+rownames(phylum_counts) <- phylum_counts$Group.1
+phylum_counts <- phylum_counts[,2:ncol(phylum_counts)]
+
+phylum_relab <- relab(phylum_counts)
+
+# do cumulative plot
+cum_plot <- data.frame(Phylum = rownames(phylum_relab),
+                       Proportion = rowMeans(phylum_relab))
+
+cum_plot <- cum_plot[order(cum_plot$Proportion, decreasing = TRUE),]
+cum_plot$cumsum <- cumsum(cum_plot$Proportion)
+
+cum_plot$Phylum <- factor(cum_plot$Phylum, levels=cum_plot$Phylum)
+ggplot(cum_plot, aes(x=Phylum, y=cumsum)) +
+  geom_point() +
+  geom_hline(yintercept = 99, linetype="dashed", color="blue") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle=45, hjust=1)) +
+  ylab("Cumulative mean proportion") 
+
+ggsave("export.dir/figures/cumsum.pdf", height=3, width=3)
+
+# melt the data
+phylum_relab$Phylum <- rownames(phylum_relab)
+phylum_relab_m <- reshape2::melt(phylum_relab)
+
+# add relevant metadata
+phylum_relab_m$Timepoint <- metadata[phylum_relab_m$variable,]$Timepoint
+phylum_relab_m$Treatment <- metadata[phylum_relab_m$variable,]$Allocationcode
+
+# Just want to plot the to 4 i.e that contribute an average of 99% of the 
+# sequencing data
+phylum_relab_m <- phylum_relab_m[phylum_relab_m$Phylum %in% cum_plot$Phylum[1:4],]
+
+# plot
+phylum_colors <- OCMSutility::getPalette(n=4, palette="Set1")
+ggplot(phylum_relab_m, aes(x=variable, y=value, fill=Phylum)) +
+  geom_bar(stat="identity") +
+  facet_wrap(~Timepoint ~ Treatment, scales="free") +
+  theme_classic() +
+  scale_fill_manual(values = phylum_colors) +
+  ylab("% reads") +
+  xlab("Sample") +
+  theme(axis.text.x = element_blank()) 
+
+ggsave(file="export.dir/figures/phylum_boxplot.pdf", height=4, width=6)
+```
+
+
+## Proteobacteria
+
+Proteobacteria are reportedly high for aged populations. Here we get the average just to see this - it appears to be the case by the plot.
+
+```{r proteobacteria average, echo=FALSE, message=FALSE}
+
+mean_proteo <- mean(unlist(phylum_relab["Proteobacteria", 1:ncol(phylum_relab) -1]))
+
+print(mean_proteo)
+```
+
+
+## Alpha diversity [baseline]
+
+Here we assess alpha diversity at the ASV level and determine whether there are any influences of different demographic and clinical characterisitics on alpha diversity. 
+
+```{r alpha diversity, echo=FALSE, message=FALSE}
+
+# numbers of baseline samples in each group
+n_baseline <- metadata[metadata$Timepoint == "Baseline", ]
+table(n_baseline$Allocationcode)
+
+shannon <- vegan::diversity(asv, index = "shannon", MARGIN = 2, base=2)
+invsimpson <- vegan::diversity(asv, index = "invsimpson", MARGIN = 2)
+richness <- colSums(asv > 0)
+
+metadata$Shannon <- shannon
+metadata$InvSimpson <- invsimpson
+metadata$Richness <- vegan::specnumber(asv, MARGIN = 2)
+
+alpha_div_plots <- list()
+to_assess <- c("GENDER", "FRAI_BL", "PPI_BL", "LAX_BL", "VITD_BL", "ANTIM_BL", "Allocationcode")
+
+
+# get frailty into order
+metadata$FRAI_BL <- factor(metadata$FRAI_BL,
+                           levels = c("Very fit",
+                                      "Well",
+                                      "Managing well",
+                                      "Vulnerable",
+                                      "Mildly frail",
+                                      "Moderately frail",
+                                      "Severely frail",
+                                      "Very severely frail"))
+
+for (i in 1:length(to_assess)){
+  
+  variable <- to_assess[i]
+  p <- ggplot(metadata[metadata$Timepoint == "Baseline", ], aes(x=!! sym(variable), y=Shannon)) +
+         geom_boxplot(outlier.alpha=0) +
+         geom_jitter(height=0, width=0.1) +
+         theme_classic() +
+         ggpubr::stat_compare_means() +
+         ggtitle(variable) +
+         facet_wrap(~Timepoint) +
+    theme(axis.text.x = element_text(angle=45, hjust=1))
+  alpha_div_plots[[i]] <- p
+}
+
+p_all_alpha <- gridExtra::grid.arrange(grobs=alpha_div_plots, nrow=3)
+ggsave(p_all_alpha, file = "export.dir/alpha_all_variables.pdf", height=10, width=10)
+
+```
+
+Sex effect as previously described.
+
+## Alpha diversity [baseline]
+
+Here we just do a sanity check to make sure that alpha diversity is not changing with respect to allocation of probiotic or not in baseline samples.
+
+```{r alpha baseline, echo=FALSE, message=FALSE}
+
+ggplot(metadata[metadata$Timepoint == "Baseline",], aes(x=Allocationcode, y=Shannon, color=Allocationcode)) +
+  geom_boxplot() +
+  geom_jitter(height=0, width=0.1) +
+  scale_color_manual(values=c("plum4", "plum")) +
+  theme_classic() +
+  ggpubr::stat_compare_means() +
+  theme(axis.text.x=element_text(angle=45, hjust=1), legend.position="none") 
+
+# save
+ggsave("export.dir/figures/alpha_baseline.pdf", height = 3, width=3)
+
+```
+
+
+## Alpha diversity in Abx exposure
+
+
+```{r abx exposure antibiotics, echo=FALSE, message=FALSE}
+metadata$Alloc_Abx <- factor(metadata$Alloc_Abx, levels = c("Placebo; No abx", "Placebo; Abx", "Probiotic; No abx", "Probiotic; Abx"))
+
+ggplot(metadata[metadata$Timepoint == "Three-months",], aes(x=Alloc_Abx, y = Shannon, color=Alloc_Abx)) +
+  geom_boxplot(outlier.alpha=0) +
+  geom_jitter(height=0, width=0.1) +
+  theme_classic() +
+  scale_color_manual(values=group_colors) +
+  ggpubr::stat_compare_means(comparisons = list(c(1,2), c(3,4), c(1,3), c(2,4))) +
+  theme(legend.position="none")
+  
+ggsave("export.dir/figures/alpha_abx.pdf", height=3, width=4.5)  
+
+
+
+```
+
+We can also look at this in terms of change from baseline which may be more intuitive in some ways.
+
+```{r change from baseline, echo=FALSE, message=FALSE}
+
+# test the significance of the interactions
+samples_both <- metadata_both$New_PID
+
+p_pla <- ggplot(metadata[metadata$Allocationcode == "placebo" & metadata$New_PID %in% samples_both,], aes(x = Timepoint, y=Shannon, group=New_PID)) +
+  geom_point() +
+  theme_classic() +
+  geom_line() +
+  ggtitle("Change in placebo group") +
+  ylim(c(0,7)) +
+  facet_wrap(~ABXEXPOSED_3M)
+
+p_pro <- ggplot(metadata[metadata$Allocationcode == "probiotic" & metadata$New_PID %in% samples_both,], aes(x = Timepoint, y=Shannon, group=New_PID)) +
+  geom_point() +
+  theme_classic() +
+  geom_line() +
+  ggtitle("Change in probiotic group")  +
+  ylim(c(0,7)) +
+  facet_wrap(~ABXEXPOSED_3M)
+
+gridExtra::grid.arrange(p_pla, p_pro, nrow=1)
+
+
+# test whether the change in the probiotic group is higher than the change
+# in the placebo group
+meta_test <- metadata[(metadata$Alloc_Abx == "Placebo; Abx" | metadata$Alloc_Abx == "Probiotic; Abx") & metadata$New_PID %in% samples_both,]
+
+
+lme_test <-  lmerTest::lmer(Shannon~Alloc_Abx + Timepoint + Alloc_Abx*Timepoint + (1|New_PID), data=meta_test)
+anova(lme_test)
+
+
+# Antibotic in placebo
+x_pla_a <- metadata[metadata$Timepoint == "Baseline" & metadata$Allocationcode == "placebo" & metadata$ABXEXPOSED_3M == "Exposed to antibiotics" &  metadata$New_PID %in% samples_both,]
+x_pla_a <- x_pla_a[order(x_pla_a$New_PID),]
+y_pla_a <- metadata[metadata$Timepoint == "Three-months" & metadata$Allocationcode == "placebo" & metadata$ABXEXPOSED_3M == "Exposed to antibiotics" & metadata$New_PID %in% samples_both,]
+y_pla_a <- y_pla_a[order(y_pla_a$New_PID),]
+
+wilcox.test(x=x_pla_a$Shannon, y=y_pla_a$Shannon, paired=TRUE)
+
+# No antibiotics in placebo
+x_pla <- metadata[metadata$Timepoint == "Baseline" & metadata$Allocationcode == "placebo" & metadata$ABXEXPOSED_3M == "Not exposed to antibiotics" &  metadata$New_PID %in% samples_both,]
+x_pla <- x_pla[order(x_pla$New_PID),]
+y_pla <- metadata[metadata$Timepoint == "Three-months" & metadata$Allocationcode == "placebo" & metadata$ABXEXPOSED_3M == "Not exposed to antibiotics" & metadata$New_PID %in% samples_both,]
+y_pla <- y_pla[order(y_pla$New_PID),]
+
+wilcox.test(x=x_pla$Shannon, y=y_pla$Shannon, paired=TRUE)
+
+
+# Antibiotics in probiotic group
+x_pro_a <- metadata[metadata$Timepoint == "Baseline" & metadata$Allocationcode == "probiotic" & metadata$ABXEXPOSED_3M == "Exposed to antibiotics" & metadata$New_PID %in% samples_both,]
+x_pro_a <- x_pro_a[order(x_pro_a$New_PID),]
+y_pro_a <- metadata[metadata$Timepoint == "Three-months" & metadata$Allocationcode == "probiotic" & metadata$ABXEXPOSED_3M == "Exposed to antibiotics" & metadata$New_PID %in% samples_both,]
+y_pro_a <- y_pro_a[order(y_pro_a$New_PID),]
+
+wilcox.test(x=x_pro_a$Shannon, y=y_pro_a$Shannon, paired=TRUE)
+
+
+# No antibiotics in probiotic group
+x_pro <- metadata[metadata$Timepoint == "Baseline" & metadata$Allocationcode == "probiotic" & metadata$ABXEXPOSED_3M == "Not exposed to antibiotics" & metadata$New_PID %in% samples_both,]
+x_pro <- x_pro[order(x_pro$New_PID),]
+y_pro <- metadata[metadata$Timepoint == "Three-months" & metadata$Allocationcode == "probiotic" & metadata$ABXEXPOSED_3M == "Not exposed to antibiotics" & metadata$New_PID %in% samples_both,]
+y_pro <- y_pro[order(y_pro$New_PID),]
+
+wilcox.test(x=x_pro$Shannon, y=y_pro$Shannon, paired=TRUE)
+
+```
+
+Whichever way you look at it there looks like a decrease in the probiotics group - significance is somewhat dependent on whether you look at the subset of individuals with both timepoints or the more samples in the unpaired test.
+
+
+# Taxanomic changes
+
+Here we explore changes in beta diversity and specific taxonomic changes at the genus level.
+
+## Beta diversity {.tabset .tabset-pills}
+
+First I am looking at beta diversity in the baseline samples. This will give us a sense of which clinical variables associate with the microbiome as well as determine whether there is any evidence for sporadic associations between the allocation groups.
+
+### Baseline beta
+
+Here we look at how each of the clinical variables is associated with beta diversity. We also specifically take a look to see if there is any non-randomness in terms of sporadic associations between the microbiome and allocation group.
+
+```{r beta diversity, echo=FALSE, message=FALSE}
+
+# baseline
+meta_baseline <- metadata[metadata$Timepoint == "Baseline",]
+genus_baseline <- relab(genus_counts[,rownames(meta_baseline)])
+
+phy_baseline <- otu_table(genus_baseline, taxa_are_rows = TRUE)
+phy_baseline <- merge_phyloseq(phy_baseline, sample_data(meta_baseline))
+
+# see how different baseline clinical variables contribute to 
+# variation
+r_squares <- list()
+p_vals <- list()
+for (i in 1:length(to_assess)){
+  variable <- to_assess[i]
+  cat(paste0(variable, "\n"))
+  x <- vegan::adonis2(t(genus_baseline) ~ meta_baseline[,variable], data=meta_baseline, method="bray")
+  print(x)
+  r_squares[[i]] <- x$R2[1]
+  p_vals[[i]] <- x$`Pr(>F)`[1]
+}
+names(r_squares) <- to_assess
+
+r_squares <- as.data.frame(t(as.data.frame(r_squares)))
+r_squares$Variable <- rownames(r_squares)
+r_squares$pval <- unlist(p_vals)
+colnames(r_squares) <- c("Variance_explained", "Variable", "Pval")
+
+# order by high to low
+r_squares <- r_squares[order(r_squares$Variance_explained, decreasing = FALSE),]
+r_squares$Variable <- factor(r_squares$Variable, levels=r_squares$Variable)
+
+knitr::kable(r_squares)
+
+ggplot(r_squares, aes(x=Variable, y=Variance_explained, fill=Pval)) +
+  geom_bar(stat="identity") +
+  theme_classic() +
+  coord_flip() +
+  scale_fill_gradient2()
+ggsave("export.dir/figures/r2_baseline.pdf", height=3, width=3)
+
+
+plot_ordination(phy_baseline, ordination=ordinate(phy_baseline, method="MDS"), color="Allocationcode") +
+  theme_classic() +
+  scale_color_manual(values=c("plum4", "plum")) +
+  stat_ellipse()
+
+ggsave("export.dir/figures/beta_baseline.pdf", height=3, width=4.5)
+
+```
+
+### Baseline DESeq2
+
+This analysis is to see whether we can detect differences between allocation groups at baseline. There certainly shouldn't be any differences but if there are they could impact on downstream interpretation.
+
+```{r baseline deseq, echo=FALSE, message=FALSE}
+
+genera_to_keep <- rownames(genus_baseline[rowSums(genus_baseline > 0.01) > 25,])
+
+dds <- DESeq2::DESeqDataSetFromMatrix(genus_counts[genera_to_keep, rownames(meta_baseline)] + 1,
+                              meta_baseline,
+                              design=~Allocationcode)
+dds <- DESeq2::DESeq(dds)
+baseline_res <- DESeq2::results(dds)
+
+sig_baseline <-  baseline_res[baseline_res$padj < 0.05 & !(is.na(baseline_res$padj)),]
+
+featurebox(genus_baseline, meta_baseline, features=rownames(sig_baseline), group_by = "Allocationcode") +
+  facet_wrap(~feature, scales = "free")
+
+```
+
+## Associations with Abx exposure {.tabset .tabset-pills}
+
+Here I am splitting the analysis into two - one looking at the placebo group and the other looking at the probiotic group. This is based on observations of alterations in alpha diversity specifically in the probiotic group but not in the placebo group.
+
+### Beta diversity ~ ABX exposure [Genus]
+
+```{r split data into placebo and probiotic, echo=FALSE, message=FALSE}
+
+# split by placebo and probiotic (only looking at three months)
+meta_placebo <- metadata[metadata$Timepoint == "Three-months" & metadata$Allocationcode == "placebo",]
+meta_probiotic <- metadata[metadata$Timepoint == "Three-months" & metadata$Allocationcode == "probiotic",]
+
+genus_placebo <- genus_counts[,rownames(meta_placebo)]
+genus_probiotic <- genus_counts[,rownames(meta_probiotic)]
+
+phy_placebo <- merge_phyloseq(otu_table(relab(genus_placebo), taxa_are_rows = TRUE), sample_data(meta_placebo))
+phy_probiotic <- merge_phyloseq(otu_table(relab(genus_probiotic), taxa_are_rows = TRUE), sample_data(meta_probiotic))
+
+
+placebo_colors <- RColorBrewer::brewer.pal(5, "BuPu")
+placebo_colors <- c("Exposed to antibiotics" = placebo_colors[5],
+                    "Not exposed to antibiotics" = placebo_colors[2])
+
+probiotic_colors <- RColorBrewer::brewer.pal(5, "Reds")
+probiotic_colors <- c("Exposed to antibiotics" = probiotic_colors[5],
+                    "Not exposed to antibiotics" = probiotic_colors[2])
+
+
+p1 <- plot_ordination(phy_placebo, ordination=ordinate(phy_placebo, method="MDS"), color="ABXEXPOSED_3M") +
+  theme_classic() +
+  scale_color_manual(values = placebo_colors) +
+  stat_ellipse() 
+  
+p2 <- plot_ordination(phy_probiotic, ordination=ordinate(phy_probiotic, method="MDS"), color="ABXEXPOSED_3M") +
+  theme_classic() +
+  scale_color_manual(values = probiotic_colors) +
+  stat_ellipse() 
+  
+p_ord <- gridExtra::grid.arrange(p1, p2, nrow=1)
+
+p_ord
+ggsave("export.dir/figures/abx_ordination.pdf", plot=p_ord, height=3, width=9)
+
+
+# test for significance using adonis test
+cat("Placebo\n\n")
+print(vegan::adonis2(t(genus_placebo) ~ ABXEXPOSED_3M, data=meta_placebo))
+
+cat("Probiotic\n\n")
+print(vegan::adonis2(t(genus_probiotic) ~ ABXEXPOSED_3M, data=meta_probiotic))
+
+```
+
+
+### Differential abundance ~ ABX exposure [Genus]
+
+```{r deseq by abxexposure, echo=FALSE, message=FALSE}
+
+# inlcude all Alloc_Abx groups to be able to get each contrast when required
+meta_abx <- metadata[c(rownames(meta_placebo), rownames(meta_probiotic)),]
+genus_counts <- genus_counts[,rownames(meta_abx)]
+
+# filter for prevalence
+genus_counts <- genus_counts[rowSums(genus_counts > 0) > ncol(genus_counts)/4,]
+
+dds_three <- DESeqDataSetFromMatrix(genus_counts,
+                                    meta_abx,
+                                    design = ~Alloc_Abx)
+
+dds_three <- DESeq(dds_three)
+
+# effect of probiotic in the absence of antibiotics
+res_probiotic_genus <- results(dds_three, name = "Alloc_Abx_Probiotic..No.abx_vs_Placebo..No.abx")
+
+# effect of antibiotics in the placebo group
+res_abx_placebo_genus <- results(dds_three, name = "Alloc_Abx_Placebo..Abx_vs_Placebo..No.abx")
+
+# need to run again to get all relevant contrasts
+dds_three$Alloc_Abx <- relevel(dds_three$Alloc_Abx, ref="Probiotic; No abx")
+dds_three <- DESeq(dds_three)
+
+# effect of antibiotics in the probiotic group
+res_abx_probiotic_genus <- results(dds_three, name="Alloc_Abx_Probiotic..Abx_vs_Probiotic..No.abx")
+
+# write out
+write.table(data.frame(feature = rownames(res_abx_placebo_genus), res_abx_placebo_genus),
+            file="export.dir/deseq_placebo.tsv",
+            row.names=FALSE,
+            quote=FALSE,
+            sep="\t")
+
+write.table(data.frame(feature = rownames(res_abx_probiotic_genus), res_abx_probiotic_genus),
+            file="export.dir/deseq_probiotic.tsv",
+            row.names=FALSE,
+            quote=FALSE,
+            sep="\t")
+
+# Get all significant features for each one
+get_sig <- function(x){
+  return(x[x$padj < 0.05 & !is.na(x$padj),])
+}
+
+sig_probiotic_genus <- get_sig(res_probiotic_genus)
+sig_abx_placebo_genus <- get_sig(res_abx_placebo_genus)
+sig_abx_probiotic_genus <- get_sig(res_abx_probiotic_genus)
+
+```
+
+### Differential abundance ~ ABX exposure [Family]
+
+```{r deseq by abxexposure family, echo=FALSE, message=FALSE}
+
+# aggregate counts at the genus level
+families <- gsub("ASV[0-9].*:", "", rownames(asv))
+families <- gsub(";g__.*", "", families)
+
+family_counts <- aggregate(asv, by=list(as.factor(families)), FUN="sum")
+rownames(family_counts) <- family_counts$Group.1
+family_counts <- family_counts[,2:ncol(family_counts)]
+
+# Remove genera that are NA at genus level
+family_counts <- family_counts[grep("f__NA", rownames(family_counts), invert=TRUE),]
+family_counts <- family_counts[rowSums(family_counts > 0) > (ncol(family_counts)/4),]
+
+family_counts <- family_counts[,rownames(meta_abx)]
+
+dds_three <- DESeqDataSetFromMatrix(family_counts,
+                                    meta_abx,
+                                    design = ~Alloc_Abx)
+
+dds_three <- DESeq(dds_three)
+
+# effect of probiotic in the absence of antibiotics
+res_probiotic_family <- results(dds_three, name = "Alloc_Abx_Probiotic..No.abx_vs_Placebo..No.abx")
+
+# effect of antibiotics in the placebo group
+res_abx_placebo_family <- results(dds_three, name = "Alloc_Abx_Placebo..Abx_vs_Placebo..No.abx")
+
+# need to run again to get all relevant contrasts
+dds_three$Alloc_Abx <- relevel(dds_three$Alloc_Abx, ref="Probiotic; No abx")
+dds_three <- DESeq(dds_three)
+
+# effect of antibiotics in the probiotic group
+res_abx_probiotic_family <- results(dds_three, name="Alloc_Abx_Probiotic..Abx_vs_Probiotic..No.abx")
+
+# Get all significant features for each one
+sig_probiotic_family <- get_sig(res_probiotic)
+sig_abx_placebo_family <- get_sig(res_abx_placebo)
+sig_abx_probiotic_family <- get_sig(res_abx_probiotic)
+
+
+```
+
+### Differential abundance ~ ABX exposure [Order]
+
+```{r deseq by abxexposure order, echo=FALSE, message=FALSE}
+
+# aggregate counts at the genus level
+orders <- gsub("ASV[0-9].*:", "", rownames(asv))
+orders <- gsub(";f__.*", "", orders)
+
+order_counts <- aggregate(asv, by=list(as.factor(orders)), FUN="sum")
+rownames(order_counts) <- order_counts$Group.1
+order_counts <- order_counts[,2:ncol(order_counts)]
+
+# Remove genera that are NA at genus level
+order_counts <- order_counts[grep("o__NA", rownames(order_counts), invert=TRUE),]
+
+order_counts <- order_counts[rowSums(order_counts > 0) > ncol(order_counts)/4,]
+
+order_counts <- order_counts[,rownames(meta_abx)]
+
+dds_three <- DESeqDataSetFromMatrix(order_counts,
+                                    meta_abx,
+                                    design = ~Alloc_Abx)
+
+dds_three <- DESeq(dds_three)
+
+# effect of probiotic in the absence of antibiotics
+res_probiotic_order <- results(dds_three, name = "Alloc_Abx_Probiotic..No.abx_vs_Placebo..No.abx")
+
+# effect of antibiotics in the placebo group
+res_abx_placebo_order <- results(dds_three, name = "Alloc_Abx_Placebo..Abx_vs_Placebo..No.abx")
+
+# need to run again to get all relevant contrasts
+dds_three$Alloc_Abx <- relevel(dds_three$Alloc_Abx, ref="Probiotic; No abx")
+dds_three <- DESeq(dds_three)
+
+# effect of antibiotics in the probiotic group
+res_abx_probiotic_order <- results(dds_three, name="Alloc_Abx_Probiotic..Abx_vs_Probiotic..No.abx")
+
+# Get all significant features for each one
+sig_probiotic_order <- get_sig(res_probiotic)
+sig_abx_placebo_order <- get_sig(res_abx_placebo)
+sig_abx_probiotic_order <- get_sig(res_abx_probiotic)
+
+
+```
+
+### Differential abundance ~ ABX exposure [Class]
+
+```{r deseq by abxexposure class, echo=FALSE, message=FALSE}
+
+# aggregate counts at the genus level
+classes <- gsub("ASV[0-9].*:", "", rownames(asv))
+classes <- gsub(";o__.*", "", classes)
+
+class_counts <- aggregate(asv, by=list(as.factor(classes)), FUN="sum")
+rownames(class_counts) <- class_counts$Group.1
+class_counts <- class_counts[,2:ncol(class_counts)]
+
+# Remove genera that are NA at genus level
+class_counts <- class_counts[grep("o__NA", rownames(class_counts), invert=TRUE),]
+
+class_counts <- class_counts[rowSums(class_counts > 0) > ncol(class_counts)/2,]
+
+class_counts <- class_counts[,rownames(meta_abx)]
+
+dds_three <- DESeqDataSetFromMatrix(class_counts,
+                                    meta_abx,
+                                    design = ~Alloc_Abx)
+
+dds_three <- DESeq(dds_three)
+
+# effect of probiotic in the absence of antibiotics
+res_probiotic_class <- results(dds_three, name = "Alloc_Abx_Probiotic..No.abx_vs_Placebo..No.abx")
+
+# effect of antibiotics in the placebo group
+res_abx_placebo_class <- results(dds_three, name = "Alloc_Abx_Placebo..Abx_vs_Placebo..No.abx")
+
+# need to run again to get all relevant contrasts
+dds_three$Alloc_Abx <- relevel(dds_three$Alloc_Abx, ref="Probiotic; No abx")
+dds_three <- DESeq(dds_three)
+
+# effect of antibiotics in the probiotic group
+res_abx_probiotic_class <- results(dds_three, name="Alloc_Abx_Probiotic..Abx_vs_Probiotic..No.abx")
+
+# Get all significant features for each one
+sig_probiotic_class <- get_sig(res_probiotic)
+sig_abx_placebo_class <- get_sig(res_abx_placebo)
+sig_abx_probiotic_class <- get_sig(res_abx_probiotic)
+
+```
+
+
+### Differential abundance ~ ABX exposure [Phylum]
+
+```{r deseq by abxexposure phylum, echo=FALSE, message=FALSE}
+
+# aggregate counts at the genus level
+phyla <- gsub("ASV[0-9].*:", "", rownames(asv))
+phyla <- gsub(";c__.*", "", phyla)
+
+phylum_counts <- aggregate(asv, by=list(as.factor(phyla)), FUN="sum")
+rownames(phylum_counts) <- phylum_counts$Group.1
+phylum_counts <- phylum_counts[,2:ncol(phylum_counts)]
+
+# Remove genera that are NA at genus level
+phylum_counts <- phylum_counts[grep("p__NA", rownames(phylum_counts), invert=TRUE),]
+
+phylum_counts <- phylum_counts[rowSums(phylum_counts > 0) > ncol(phylum_counts)/4,]
+
+phylum_counts <- phylum_counts[,rownames(meta_abx)]
+
+dds_three <- DESeqDataSetFromMatrix(phylum_counts,
+                                    meta_abx,
+                                    design = ~Alloc_Abx)
+
+dds_three <- DESeq(dds_three)
+
+plotDispEsts(dds_three)
+
+# effect of probiotic in the absence of antibiotics
+res_probiotic_phylum <- results(dds_three, name = "Alloc_Abx_Probiotic..No.abx_vs_Placebo..No.abx")
+
+# effect of antibiotics in the placebo group
+res_abx_placebo_phylum <- results(dds_three, name = "Alloc_Abx_Placebo..Abx_vs_Placebo..No.abx")
+
+# need to run again to get all relevant contrasts
+dds_three$Alloc_Abx <- relevel(dds_three$Alloc_Abx, ref="Probiotic; No abx")
+dds_three <- DESeq(dds_three)
+
+# effect of antibiotics in the probiotic group
+res_abx_probiotic_phylum <- results(dds_three, name="Alloc_Abx_Probiotic..Abx_vs_Probiotic..No.abx")
+
+# Get all significant features for each one
+sig_probiotic_phylum <- get_sig(res_probiotic)
+sig_abx_placebo_phylum <- get_sig(res_abx_placebo)
+sig_abx_probiotic_phylum <- get_sig(res_abx_probiotic)
+
+```
+
+```{r merge diff results, echo=FALSE, message=FALSE}
+
+# placebo merges
+rownames(res_abx_placebo_phylum) <- gsub("(k__.*;)", "", rownames(res_abx_placebo_phylum))
+rownames(res_abx_placebo_class) <- gsub("(.*;)", "", gsub(";o__.*", "", rownames(res_abx_placebo_class)))
+rownames(res_abx_placebo_order) <- gsub("(.*;)", "", gsub(";f__.*", "", rownames(res_abx_placebo_order)))
+rownames(res_abx_placebo_family) <- gsub("(.*;)", "", gsub(";g__.*", "", rownames(res_abx_placebo_family)))
+rownames(res_abx_placebo_genus) <- gsub("(.*;)", "", rownames(res_abx_placebo_genus))
+
+placebo_all_diff <- list(as.data.frame(res_abx_placebo_phylum),
+                         as.data.frame(res_abx_placebo_class),
+                         as.data.frame(res_abx_placebo_order),
+                         as.data.frame(res_abx_placebo_family),
+                         as.data.frame(res_abx_placebo_genus))
+
+placebo_all_diff <- dplyr::bind_rows(placebo_all_diff)
+
+# probiotic merges
+rownames(res_abx_probiotic_phylum) <- gsub("(k__.*;)", "", rownames(res_abx_probiotic_phylum))
+rownames(res_abx_probiotic_class) <- gsub("(.*;)", "", gsub(";o__.*", "", rownames(res_abx_probiotic_class)))
+rownames(res_abx_probiotic_order) <- gsub("(.*;)", "", gsub(";f__.*", "", rownames(res_abx_probiotic_order)))
+rownames(res_abx_probiotic_family) <- gsub("(.*;)", "", gsub(";g__.*", "", rownames(res_abx_probiotic_family)))
+rownames(res_abx_probiotic_genus) <- gsub("(.*;)", "", rownames(res_abx_probiotic_genus))
+
+probiotic_all_diff <- list(as.data.frame(res_abx_probiotic_phylum),
+                         as.data.frame(res_abx_probiotic_class),
+                         as.data.frame(res_abx_probiotic_order),
+                         as.data.frame(res_abx_probiotic_family),
+                         as.data.frame(res_abx_probiotic_genus))
+
+probiotic_all_diff <- dplyr::bind_rows(probiotic_all_diff)
+
+if (!(dir.exists("export.dir"))){
+  dir.create("export.dir")
+}
+
+write.table(data.frame(taxa = rownames(placebo_all_diff), placebo_all_diff), file="export.dir/deseq_placebo.tsv",
+            sep="\t",
+            quote=FALSE,
+            row.names=FALSE)
+
+write.table(data.frame(taxa = rownames(probiotic_all_diff), probiotic_all_diff), file="export.dir/deseq_probiotic.tsv",
+            sep="\t",
+            quote=FALSE,
+            row.names=FALSE)
+
+```
+
+
+## Visualising the difference across taxonomic levels
+
+Here we use ggtree to try and visualise the differences between probitotic treatment and placebo treatment in relation to antibiotic exposure.
+
+```{r trees, echo=FALSE, message=FALSE}
+
+# build a standard tsv tree
+taxa <- rownames(genus_counts)
+taxa <- gsub("(k__Bacteria;)", "", taxa)
+taxa <- taxa[grep("k__Archaea", taxa, invert=TRUE)]
+taxa <- strsplit(taxa, ";")
+taxa <- as.data.frame(unlist(lapply(taxa, function(x) paste(x, collapse="."))))
+write.table(taxa, file="export.dir/tree_file.tsv", row.names=FALSE, quote=FALSE, col.names = FALSE, sep="\t")
+
+phytree <- treeio::read.phyloxml("export.dir/out_tree")
+
+# manipulate associated data
+# here we add all relevant metadta like changes in abx. We then have 
+# a shared tree that can be compared across probiotics and placebo
+phy_tibble <- tidytree::as_tibble(phytree)
+
+# add phylum annotation for colouring by phylum
+phylum_anno <- data.frame(phylum = gsub("\\.c__.*", "", taxa[,1]))
+phylum_anno$class <- gsub("(.*\\.)", "", gsub("\\.o__.*", "", taxa[,1]))
+phylum_anno$order <- gsub("(.*\\.)", "", gsub("\\.f__.*", "", taxa[,1]))
+phylum_anno$family <- gsub("(.*\\.)", "", gsub("\\.g__.*", "", taxa[,1]))
+phylum_anno$genus <- gsub("(.*\\.)", "", taxa[,1])
+phylum_anno_long <- tidyr::pivot_longer(phylum_anno, cols=c(class, order, family, genus))
+phylum_anno_long <- dplyr::distinct(as.data.frame((phylum_anno_long)))
+phylum_anno_long <- phylum_anno_long[!phylum_anno_long$value %in% c("c__-", "o__-", "f__-", "g__-"),]
+rownames(phylum_anno_long) <- phylum_anno_long$value
+
+phy_tibble$phylum <- phylum_anno_long[phy_tibble$label,]$phylum 
+
+# add annotations of changes in abx treatment
+# to compare between placebo and probiotic responses
+
+# probiotic
+phy_tibble$probiotic_change <- ifelse(phy_tibble$label %in% c("g__Enterococcus"), "Up", NA)
+phy_tibble$probiotic_change <- ifelse(phy_tibble$label %in% c("g__Intestinimonas", "g__Oscillibacter"), "Down", phy_tibble$probiotic_change)
+phy_tibble$probiotic_change <- ifelse(phy_tibble$label %in% c("g__Coprococcus"), "Placebo", phy_tibble$probiotic_change)
+
+
+phy_tibble$probiotic_size <- ifelse(phy_tibble$probiotic_change == "No", 1, 2)
+
+# add data back  
+phytree@data <- tidyr::as_tibble(phy_tibble)
+
+# phylum colors
+phycolors <- getPalette(n=8, palette = "Set1")
+names(phycolors) <- unique(phy_tibble$phylum)
+phycolors <- c(phycolors, c("No" = "grey", "Up" = "red3", "Down" = "#FCAE91"), "Placebo" = "magenta3")
+
+tree_probiotic <- ggtree(phytree, aes(color=phylum), layout="radial") + 
+  geom_tiplab(geom="text", size=3, aes(label=phytree@data$label), hjust=-0.1) +
+  geom_nodepoint(data=phytree, aes(color=probiotic_change, size=probiotic_size)) +
+  geom_tippoint(data=phytree, aes(color=probiotic_change, size=probiotic_size)) +
+  #geom_nodelab(aes(label=phytree@data$label), size=2, nudge_y=1) +
+  scale_color_manual(values=phycolors) +
+  scale_size(range=c(3))
+   
+tree_probiotic
+ggsave("export.dir/figures/tree.pdf", height=5, width=7)
+
+```
+
+
+
+## Exploring the different sets {.tabset .tabset-pills}
+
+Here we look at which genera are different in the different conditions and see if we can make some sense of it.
+
+```{r explore sets, echo=FALSE, message=FALSE}
+
+# make mapping of long names to shortened genus names
+short_names <- data.frame("Long" = rownames(genus_counts),
+                          "Short" = rep(NA, nrow(genus_counts)))
+
+short_names$Short <- gsub("(.*);g__", "", short_names$Long)
+rownames(short_names) <- short_names$Long
+
+```
+
+### Correlate fold changes
+
+Here I correlate fold changes to see the extent to which antibiotic exposure affects individual taxa in placebo relative to probiotic groups.
+
+```{r correlate fold changes, echo=FALSE, message=FALSE}
+
+# copy tables for manipulation purposes
+pla_diff <- placebo_res
+pro_diff <- probiotic_res
+
+rownames(pla_diff) <- short_names[rownames(pla_diff), ]$Short 
+rownames(pro_diff) <- short_names[rownames(pro_diff), ]$Short 
+
+# create new data frame for plotting
+fcs <- data.frame("Genus" = rownames(pla_diff),
+                  "Placebo_FC" = pla_diff$log2FoldChange,
+                  "Probiotic_FC" = pro_diff[rownames(pla_diff),]$log2FoldChange)
+
+# add labels for significance
+pla_sig <- short_names[rownames(sig_placebo),]$Short
+pro_sig <- short_names[rownames(sig_probiotic),]$Short
+
+# add labels
+fcs$Sig <- ifelse(fcs$Genus %in% pla_sig, "Placebo", NA)
+fcs$Sig <- ifelse(fcs$Genus %in% pro_sig, "Probiotic", fcs$Sig)
+fcs$Sig <- ifelse(fcs$Genus %in% intersect(pla_sig, pro_sig), "Both", fcs$Sig)
+
+ggplot(fcs, aes(x = Placebo_FC, y = Probiotic_FC, color=Sig)) +
+  geom_point(size=3) +
+  theme_classic() +
+  scale_color_manual(values = c("orange", placebo_colors[[2]], probiotic_colors[[1]]))
+
+# Looks kind of interesting as there are some that increase in probiotic condition
+# but decrease in placebo condition - what are these
+fcs$Label <- ifelse(!is.na(fcs$Sig) & (abs(fcs$Placebo_FC) > 1 | abs(fcs$Probiotic_FC) > 1), fcs$Genus, NA)
+
+ggplot(fcs, aes(x = Placebo_FC, y = Probiotic_FC, color=Sig)) +
+  geom_point(size=3) +
+  theme_classic() +
+  scale_color_manual(values = c("orange", placebo_colors[[2]], probiotic_colors[[1]])) +
+  ggrepel::geom_text_repel(label=fcs$Label, color="black") +
+  geom_hline(yintercept = c(-1,1), linetype="dashed") +
+  geom_vline(xintercept = c(-1,1), linetype="dashed")
+
+
+# change the names in relative abundance table
+genus_relab <- relab(genus_counts)
+rownames(genus_relab) <- short_names[rownames(genus_relab),]$Short
+
+```
+
+
+### DESeq interaction
+
+We can model this in a slightly different way by looking explicitly at the interaction. In this model we include all data from placebo and probiotic group and look at the interaction between allocation and abx exposure.
+
+```{r interaction, echo=FALSE, message=FALSE}
+
+genus_counts_int <- genus_counts[genera_to_keep, c(rownames(meta_placebo), rownames(meta_probiotic))]
+coldata <- as.data.frame(dplyr::bind_rows(meta_placebo, meta_probiotic))
+
+dds_int <- DESeqDataSetFromMatrix(genus_counts_int, colData = coldata, design=~Allocationcode + ABXEXPOSED_3M + Allocationcode:ABXEXPOSED_3M)
+
+dds_int$Allocationcode <- relevel(dds_int$Allocationcode, ref="placebo")
+
+dds_int <- DESeq(dds_int)
+res_int <- as.data.frame(results(dds_int))
+rownames(res_int) <- short_names[rownames(res_int),]$Short
+res_int <- res_int[order(res_int$padj, decreasing=FALSE),]
+
+
+```
+
+
+## Patterns of abundance in some genera of interest {.tabset .tabset-pills}
+
+### Phylum
+
+```{r associated features, echo=FALSE, message=FALSE}
+
+# phylum - Actinobacteria
+meta_abx <- metadata[c(rownames(meta_probiotic), rownames(meta_placebo)),]
+phylum_relab <- relab(phylum_counts)[,rownames(meta_abx)]
+
+featurebox(phylum_relab, meta_abx, features=rownames(sig_abx_probiotic_phylum), group_by="Alloc_Abx") +
+  scale_y_log10() +
+  scale_color_manual(values=group_colors) +
+  facet_wrap(~feature, scales="free")
+
+
+```
+
+### Class
+
+```{r class associations, echo=FALSE, message=FALSE}
+
+class_relab <- relab(class_counts)[,rownames(meta_abx)]
+featurebox(class_relab, meta_abx, features="k__Bacteria;p__Actinobacteria;c__Actinobacteria", group_by="Alloc_Abx") +
+  scale_y_log10() +
+  scale_color_manual(values=group_colors)
+
+
+```
+
+
+### Order
+
+```{r order associations, echo=FALSE, message=FALSE}
+
+order_relab <- relab(order_counts)[,rownames(meta_abx)]
+featurebox(order_relab, meta_abx, features="k__Bacteria;p__Proteobacteria;c__Gammaproteobacteria;o__Xanthomonadales", group_by="Alloc_Abx") +
+  scale_y_log10() +
+  scale_color_manual(values=group_colors)
+
+
+```
+
+
+### Family
+
+```{r family associations, echo=FALSE, message=FALSE}
+
+family_relab <- relab(family_counts)[,rownames(meta_abx)]
+featurebox(family_relab, meta_abx, features="k__Bacteria;p__Firmicutes;c__Bacilli;o__Lactobacillales;f__Enterococcaceae", group_by="Alloc_Abx") +
+  scale_y_log10() +
+  scale_color_manual(values=group_colors)
+
+
+```
+
+
+### Genus
+
+```{r genus associations, echo=FALSE, message=FALSE}
+
+genus_relab <- relab(genus_counts)
+genus_relab <- genus_relab[,rownames(meta_abx)]
+rownames(genus_relab) <- short_names[rownames(genus_relab),]$Short
+
+set.seed(5)
+genus_clr <- OCMSutility::clr(genus_counts)
+colnames(genus_clr) <- gsub("X", "", colnames(genus_clr))
+rownames(genus_clr) <- short_names[rownames(genus_clr),]$Short
+
+
+featurebox(genus_clr[,rownames(meta_abx)], meta_abx, features=c("Coprococcus", "Oscillibacter", "Enterococcus", "Intestinimonas"), group_by="Alloc_Abx") +
+  scale_color_manual(values=group_colors) +
+  facet_wrap(~feature, scales="free") +
+  scale_y_log10() +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle=45, hjust=1), legend.position = "none")
+
+ggsave("export.dir/figures/of_interest.pdf", height=6, width=6)
+```
+
+## Specific interactions with time
+
+Here we look at those that are significant to see if we can detect an interaction over time. Will add more weight to the robustness of the associations.
+
+```{r interactions, echo=FALSE, message=FALSE}
+
+# might be best to do this on the CLR even though this wasn't how the associations were originally on counts using DESeq2
+
+# aggregate counts at the genus level
+genera <- gsub("ASV[0-9].*:", "", rownames(asv))
+genera <- gsub(";s__.*", "", genera)
+
+genus_counts <- aggregate(asv, by=list(as.factor(genera)), FUN="sum")
+rownames(genus_counts) <- genus_counts$Group.1
+genus_counts <- genus_counts[,2:ncol(genus_counts)]
+
+# Remove genera that are NA at genus level
+genus_counts <- genus_counts[grep("g__NA", rownames(genus_counts), invert=TRUE),]
+
+genus_relab <- relab(genus_counts)
+
+rownames(genus_relab) <- short_names[rownames(genus_relab),]$Short
+
+meta_interactions <- metadata[rownames(metadata) %in% rownames(metadata_both),]
+meta_interactions <- meta_interactions[meta_interactions$Alloc_Abx == "Probiotic; Abx" | meta_interactions$Alloc_Abx == "Placebo; Abx",]
+
+# Oscillibacter
+meta_interactions$Oscillibacter <- unlist(genus_relab["Oscillibacter", rownames(meta_interactions)])
+osci <- lmerTest::lmer(log10(Oscillibacter+1e-6) ~ Alloc_Abx + Timepoint + Alloc_Abx*Timepoint + (1|New_PID), data=meta_interactions)
+anova(osci)
+
+# Intestimonas
+meta_interactions$Intestinimonas <- unlist(genus_relab["Intestinimonas", rownames(meta_interactions)])
+intesti <- lmerTest::lmer(log10(Intestinimonas+1e-6) ~ Alloc_Abx + Timepoint + Alloc_Abx*Timepoint + (1|New_PID), data=meta_interactions)
+anova(intesti)
+
+# Suturella
+meta_interactions$Sutterella <- unlist(genus_relab["Sutterella", rownames(meta_interactions)])
+sut <- lmerTest::lmer(log10(Sutterella+1e-6) ~ Alloc_Abx + Timepoint + Alloc_Abx*Timepoint + (1|New_PID), data=meta_interactions)
+anova(sut)
+
+# Clostridium XVIII
+meta_interactions$Clostridium <- unlist(genus_relab["Clostridium XVIII", rownames(meta_interactions)])
+clos <- lmerTest::lmer(log10(Clostridium+1e-6) ~ Alloc_Abx + Timepoint + Alloc_Abx*Timepoint + (1|New_PID), data=meta_interactions)
+anova(clos)
+
+# Gemmiger
+meta_interactions$Gemmiger <- unlist(genus_relab["Gemmiger", rownames(meta_interactions)])
+gem <- lmerTest::lmer(log10(Gemmiger+1e-6) ~ Alloc_Abx + Timepoint + Alloc_Abx*Timepoint + (1|New_PID), data=meta_interactions)
+anova(gem)
+
+
+
+
+
+
+
+ggplot(meta_interactions, aes(x=Timepoint, y=Gemmiger, group=New_PID)) +
+  geom_point() +
+  geom_line() +
+  theme_classic() +
+  facet_wrap(~Alloc_Abx) +
+  scale_y_log10()
+
+
+```
+
+
+
+
+## Co-occurence analysis
+
+It is of interest that the probiotics may be "excluding" normal members of the microbiome under conditions of antibiotic use - we explore this here.
+
+
+
+```{r netcomi, echo=FALSE, message=FALSE}
+
+probiotic_net_spring <- netConstruct(t(genus_counts[genera_to_keep, rownames(meta_probiotic)]),
+                                     filtTax = "highestFreq",
+                                     filtTaxPar = list(highestFreq = 100),
+                                     filtSamp = "totalReads",
+                                     filtSampPar = list(totalReads = 1000),
+                                     measure = "spring",
+                                     measurePar = list(nlambda=10, 
+                                             rep.num=10),
+                                     normMethod = "none", 
+                                     zeroMethod = "none",
+                                     sparsMethod = "none", 
+                                     dissFunc = "signed",
+                                     verbose = 2,
+                                     seed = 123456)
+
+props_spring <- netAnalyze(probiotic_net_spring, 
+                           centrLCC = TRUE,
+                           clustMethod = "cluster_fast_greedy",
+                           hubPar = "eigenvector",
+                           weightDeg = FALSE, normDeg = FALSE)
+```
+
+
+
+
+
+
+
+
+```{r co-occurence, echo=FALSE, message=FALSE}
+
+# just three month samples
+genus_counts_sub <- genus_counts[genera_to_keep,
+                                 c(rownames(meta_probiotic))]
+
+genus_counts_sub <- genus_counts[genera_to_keep,
+                                 c(rownames(meta_placebo))]
+
+pr <- propr(t(genus_counts_sub), # rows as samples, like it should be
+            metric = "rho", # or "phi", "phs", "cor", "vlr"
+            ivar = "clr", # or can use "iqlr" instead
+            alpha = NA, # use to handle zeros
+            p = 100) # used by updateCutoffs
+
+pr <- updateCutoffs(pr,
+              cutoff = seq(0, 1, .05), # cutoffs at which to estimate FDR
+              ncores = 1) # parallelize here
+
+rhos <- as.data.frame(pr@matrix)
+colnames(rhos) <- short_names[colnames(rhos),]$Short
+rownames(rhos) <- short_names[rownames(rhos),]$Short
+
+# get rid of low cors
+index <- which(abs(rhos) > .3 & abs(rhos) < 1, # your criteria
+               arr.ind = T) # the result of the which function is now in rows & columns
+
+rhos_sub <- rhos[unique(rownames(index)) ,unique(rownames(index))]
+
+ComplexHeatmap::Heatmap(rhos_sub)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+

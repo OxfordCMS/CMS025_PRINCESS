@@ -1,0 +1,110 @@
+---
+title: "Compare differential abundance results"
+output: html_document
+date: "2023-10-17"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load libraries, echo=FALSE, message=FALSE}
+
+library(ComplexHeatmap)
+
+```
+
+## Compare differential abundance results {.tabset .tabset-pills}
+
+Here we compare the results from three different methods that use slightly different assumptions for differential abundance testing.
+
+```{r read data, echo=FALSE, message=FALSE}
+
+# placebo
+aldex_placebo <- read.csv("export.dir/aldex_placebo.tsv", header=TRUE, sep="\t", stringsAsFactors = FALSE)
+deseq_placebo <- read.csv("export.dir/deseq_placebo.tsv", header=TRUE, sep="\t", stringsAsFactors = FALSE)
+maaslin_placebo <- read.csv("export.dir/maaslin_placebo.tsv", header=TRUE, sep="\t", stringsAsFactors = FALSE)
+
+# placebo
+aldex_probiotic <- read.csv("export.dir/aldex_probiotic.tsv", header=TRUE, sep="\t", stringsAsFactors = FALSE)
+deseq_probiotic <- read.csv("export.dir/deseq_probiotic.tsv", header=TRUE, sep="\t", stringsAsFactors = FALSE)
+maaslin_probiotic <- read.csv("export.dir/maaslin_probiotic.tsv", header=TRUE, sep="\t", stringsAsFactors = FALSE)
+```
+
+### Placebo
+
+```{r placebo, echo=FALSE, message=FALSE}
+
+# order all in the same way
+rownames(deseq_placebo) <- deseq_placebo$feature
+rownames(aldex_placebo) <- aldex_placebo$feature
+rownames(maaslin_placebo) <- gsub("\\.", ";", maaslin_placebo$feature)
+
+aldex_placebo <- aldex_placebo[rownames(deseq_placebo),]
+maaslin_placebo <- maaslin_placebo[rownames(deseq_placebo),]
+
+# combine the qvalues
+placebo_compare <- data.frame("feature" = rownames(deseq_placebo),
+                              "DESeq2_qval" = -log10(deseq_placebo$padj),
+                              "ALDEx2_qval" = -log10(aldex_placebo$wi.eBH),
+                              "MaAsLin2_qval" = -log10(maaslin_placebo$qval))
+
+placebo_compare$Ave_qval <- rowMeans(placebo_compare[,2:ncol(placebo_compare)])
+
+# order
+placebo_compare <- placebo_compare[order(placebo_compare$Ave_qval, decreasing=TRUE),]
+rownames(placebo_compare) <- gsub("(.*);g__", "", placebo_compare$feature)
+placebo_compare <- placebo_compare[,2:ncol(placebo_compare)]
+
+
+placebo_compare_top <- placebo_compare[1:10,]
+
+pdf("export.dir/figures/placebo_heat_sig.pdf", height=4, width=5)
+Heatmap(placebo_compare_top, rect_gp = gpar(col="white"),
+        cluster_columns = FALSE,
+        col=circlize::colorRamp2(breaks = c(0,2), colors=c("white", "magenta4")),
+        cell_fun = function(j, i, x, y, width, height, fill) { grid.text(sprintf("%.1f", placebo_compare_top[i, j]), x, y, gp = gpar(fontsize = 10))})
+dev.off()
+```
+
+
+### Probiotic
+
+
+```{r probiotic, echo=FALSE, message=FALSE}
+
+# order all in the same way
+rownames(deseq_probiotic) <- deseq_probiotic$feature
+rownames(aldex_probiotic) <- aldex_probiotic$feature
+rownames(maaslin_probiotic) <- gsub("\\.", ";", maaslin_probiotic$feature)
+
+aldex_probiotic <- aldex_probiotic[rownames(deseq_probiotic),]
+maaslin_probiotic <- maaslin_probiotic[rownames(deseq_probiotic),]
+
+# combine the qvalues
+probiotic_compare <- data.frame("feature" = rownames(deseq_probiotic),
+                              "DESeq2_qval" = -log10(deseq_probiotic$padj),
+                              "ALDEx2_qval" = -log10(aldex_probiotic$wi.eBH),
+                              "MaAsLin2_qval" = -log10(maaslin_probiotic$qval))
+
+probiotic_compare$Ave_qval <- rowMeans(probiotic_compare[,2:ncol(probiotic_compare)])
+
+# order
+probiotic_compare <- probiotic_compare[order(probiotic_compare$Ave_qval, decreasing=TRUE),]
+rownames(probiotic_compare) <- gsub("(.*);g__", "", probiotic_compare$feature)
+probiotic_compare <- probiotic_compare[,2:ncol(probiotic_compare)]
+
+probiotic_compare_top <- probiotic_compare[1:10,]
+
+pdf("export.dir/figures/probiotic_heat_sig.pdf", height=4, width=5)
+Heatmap(probiotic_compare_top, rect_gp = gpar(col="white"), cluster_columns=FALSE, col=circlize::colorRamp2(breaks = c(0,2), colors=c("white", "red3")), 
+        cell_fun = function(j, i, x, y, width, height, fill) {
+        grid.text(sprintf("%.1f", probiotic_compare_top[i, j]), x, y, gp = gpar(fontsize = 10))
+})
+dev.off()
+```
+
+
+

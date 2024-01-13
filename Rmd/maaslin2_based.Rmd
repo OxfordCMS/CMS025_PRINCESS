@@ -1,0 +1,233 @@
+---
+title: "CMS025: Impact of a daily oral probiotic combination and antibiotic exposure on the gut microbiome of UK care home residents: secondary analysis of a randomised placebo-controlled trial"
+output: html_document
+date: "2023-10-04"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+options(bitmapType = "cairo")
+```
+
+```{r load libraries, echo=FALSE, message=FALSE}
+
+library(ggplot2)
+library(RSQLite)
+#library(dplyr)
+library(phyloseq)
+#library(dplyr)
+library(OCMSutility)
+library(Maaslin2)
+library(propr)
+library(NetCoMi)
+
+```
+
+
+# Overview
+
+This analysis is concerned with doing differential abundance testing using Maaslin2 - we are always plagued with zeros in these types of analyses. I suspect it won't be much different to the results of DESeq2 but for visualisation the clr is often a nicer way to present as the zeros are imputed.
+
+```{r read data, echo=FALSE, message=FALSE}
+
+# read asv counts table
+asv <- read.csv("~/work/CMS025/export/CMS025/data/taxa_abundances.tsv",
+                header = TRUE,
+                stringsAsFactors = FALSE,
+                row.names=1,
+                sep = "\t")
+
+# remove the filtered and trimmed bits and bobs
+colnames(asv) <- gsub("filtered\\.trimmed\\.", "", colnames(asv))
+
+# read metadata
+metadata <- read.csv("../../data/metadata/PRINCESS_metadata.txt",
+                     header = TRUE,
+                     stringsAsFactors = FALSE,
+                     sep="\t",
+                     row.names = 1)
+
+# remove filtered and trimmed bits from rownames
+rownames(metadata) <- sub("filtered-trimmed-", "", rownames(metadata))
+
+# check colnames and rownames match and
+# re-order
+if(!(setequal(rownames(metadata), colnames(asv)))){
+  metadata <- metadata[colnames(asv),]
+}
+
+
+# The community standard is still in here so take this out
+metadata <- metadata[rownames(metadata) != "ZymobiomicsDNAStandard",]
+asv <- asv[,colnames(asv) != "ZymobiomicsDNAStandard"]
+
+
+# There are missing patient ids so presumably these need to go
+metadata <- metadata[!(is.na(metadata$New_PID)),]
+asv <- asv[,rownames(metadata)]
+
+
+```
+
+```{r get genus level data, echo=FALSE, message=FALSE}
+
+# aggregate counts at the genus level
+genera <- gsub("ASV[0-9].*:", "", rownames(asv))
+genera <- gsub(";s__.*", "", genera)
+
+genus_counts <- aggregate(asv, by=list(as.factor(genera)), FUN="sum")
+rownames(genus_counts) <- genus_counts$Group.1
+genus_counts <- genus_counts[,2:ncol(genus_counts)]
+
+# Remove genera that are NA at genus level
+genus_counts <- genus_counts[grep("g__NA", rownames(genus_counts), invert=TRUE),]
+
+```
+
+
+### Baseline Maaslin2
+
+This analysis is to see whether we can detect differences between allocation groups at baseline. There certainly shouldn't be any differences but if there are they could impact on downstream interpretation.
+
+```{r baseline deseq, echo=FALSE, message=FALSE}
+
+meta_baseline <- metadata[metadata$Timepoint == "Baseline",]
+genus_counts_baseline <- genus_counts[,rownames(meta_baseline)]
+
+genera_to_keep <- rownames(genus_counts_baseline[rowSums(genus_counts_baseline > 0.01) > 25,])
+
+maaslin_baseline <- Maaslin2(genus_counts_baseline,
+                    meta_baseline,
+                    "maaslin_out",
+                    normalization="none",
+                    fixed_effects = "Allocationcode",
+                    reference="placebo")
+
+maaslin_res <- maaslin_baseline$results
+
+
+```
+
+## Associations with frailty
+
+```{r frailty, echo=FALSE, message=FALSE}
+
+meta_baseline$frailty <- gsub(" ", ".", meta_baseline$FRAI_BL)
+maaslin_baseline_frail <- Maaslin2(genus_counts_baseline,
+                    meta_baseline,
+                    "maaslin_out",
+                    normalization="none",
+                    fixed_effects = "frailty",
+                    reference="frailty,Very.fit")
+
+maaslin_res_frail <- maaslin_baseline_frail$results
+maaslin_res_frail <- maaslin_res_frail[order(maaslin_res_frail$qval, decreasing=FALSE),]
+```
+
+
+## Associations with PPI
+
+```{r PPI, echo=FALSE, message=FALSE}
+
+maaslin_baseline_ppi <- Maaslin2(genus_counts_baseline,
+                    meta_baseline,
+                    "maaslin_out",
+                    normalization="none",
+                    fixed_effects = "PPI_BL",
+                    reference="PPL_BL,No")
+
+maaslin_res_ppi <- maaslin_baseline_ppi$results
+maaslin_res_ppi <- maaslin_res_ppi[order(maaslin_res_ppi$qval, decreasing=FALSE),]
+```
+
+
+## Associations with Abx exposure {.tabset .tabset-pills}
+
+Here I am splitting the analysis into two - one looking at the placebo group and the other looking at the probiotic group. This is based on observations of alterations in alpha diversity specifically in the probiotic group but not in the placebo group.
+
+### Differential abundance ~ ABX exposure
+
+```{r split data into placebo and probiotic, echo=FALSE, message=FALSE}
+
+# split by placebo and probiotic (only looking at three months)
+meta_placebo <- metadata[metadata$Timepoint == "Three-months" & metadata$Allocationcode == "placebo",]
+meta_probiotic <- metadata[metadata$Timepoint == "Three-months" & metadata$Allocationcode == "probiotic",]
+
+genus_counts <- genus_counts[,c(rownames(meta_placebo), rownames(meta_probiotic))]
+genus_counts <- genus_counts[rowSums(genus_counts > 0) > ncol(genus_counts)/4,]
+
+genus_placebo <- genus_counts[, rownames(meta_placebo)]
+genus_probiotic <- genus_counts[, rownames(meta_probiotic)]
+
+
+placebo_colors <- RColorBrewer::brewer.pal(5, "BuPu")
+placebo_colors <- c("Exposed to antibiotics" = placebo_colors[5],
+                    "Not exposed to antibiotics" = placebo_colors[2])
+
+probiotic_colors <- RColorBrewer::brewer.pal(5, "Reds")
+probiotic_colors <- c("Exposed to antibiotics" = probiotic_colors[5],
+                    "Not exposed to antibiotics" = probiotic_colors[2])
+
+
+maaslin_placebo <- Maaslin2(relab(genus_placebo),
+                    meta_placebo,
+                    "maaslin_out",
+                    normalization="none",
+                    fixed_effects = "ABXEXPOSED_3M",
+                    reference="Not exposed to antibiotics")
+
+maaslin_probiotic <- Maaslin2(relab(genus_probiotic),
+                    meta_probiotic,
+                    "maaslin_out",
+                    normalization="none",
+                    fixed_effects = "ABXEXPOSED_3M",
+                    reference="Not exposed to antibiotics")
+
+
+placebo_maaslin_res <- maaslin_placebo$results
+probiotic_maaslin_res <- maaslin_probiotic$results
+
+write.table(placebo_maaslin_res, file="export.dir/maaslin_placebo.tsv",
+            row.names=FALSE,
+            quote=FALSE,
+            sep="\t")
+
+write.table(probiotic_maaslin_res, file="export.dir/maaslin_probiotic.tsv",
+            row.names=FALSE,
+            quote=FALSE,
+            sep="\t")
+
+maaslin_sig_placebo <- maaslin_placebo$results[maaslin_placebo$results$qval < 0.25,]
+maaslin_sig_probiotic <- maaslin_probiotic$results[maaslin_probiotic$results$pval < 0.05,]
+
+
+```
+
+## Maaslin interaction analysis
+
+```{r maaslin interactions, echo=FALSE, message=FALSE}
+
+genus_counts_int <- genus_counts[genera_to_keep, c(rownames(meta_placebo), rownames(meta_probiotic))]
+coldata <- as.data.frame(dplyr::bind_rows(meta_placebo, meta_probiotic))
+
+
+coldata_int <- model.matrix(~Allocationcode*ABXEXPOSED_3M, data = coldata)
+
+coldata$interaction <- coldata_int[,"Allocationcodeprobiotic:ABXEXPOSED_3MNot exposed to antibiotics"]
+
+maaslin_interaction <- Maaslin2(relab(genus_counts_int),
+                    coldata,
+                    "maaslin_out",
+                    normalization="none",
+                    fixed_effects = "interaction")
+
+
+head(maaslin_interaction$results)
+```
+
+
+
+
+

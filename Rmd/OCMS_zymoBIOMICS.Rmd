@@ -1,0 +1,489 @@
+---
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+# Analysis of DNA and cellular microbiome community standards
+
+## Overview
+
+An important aspect of microbiome profiling studies is to assess the accuaracy of the profiling work-flow. Of course, biases can be introduced at multiple levels of analysis includingn sample collection, DNA extraction, library preparation and sequencing. While we may not be able to mitigate all of the biases, we are able to assess their impact by processing and sequencing a set of microbiome standards. We currently utilise the zymoBIOMICS community standard that consists of 8 bacterial strains and 2 fungal strains. We are able to assess biases at two levels:
+
+* Efficiency of DNA extraction using the cellular standards
+* Effciency and accuracy of sequencing and informatics workflows (somewhat confounded) using DNA standards.
+
+Information on the standards can be found [here](https://files.zymoresearch.com/protocols/_d6305_d6306_zymobiomics_microbial_community_dna_standard.pdf).
+
+
+## Data analysis
+
+The analysis below contains two methods that we use (and are recommended) to analyse the community standards. The first is an analysis of the true postive rate. This determines whether we pull back everything we expect in addition to any false positives. The second method is looking at how accurately the composition (i.e. the % of reads assigned to each standard taxon) represents the expected composition of the community standard. Below is a table of the taxa that are present in the community standard and the expected compostion based on either 16S rRNA amplicon sequencing analysis or shotgun metagenomics analysis.
+
+
+|Species                   | 16S rRNA abundance % | Shotgun metagenomics abundance % |
+|--------------------------|----------------------|--------------------------------- |
+|Pseudomonas aeruginosa    | 4.2                  | 12                               |
+|Escherichia coli          | 10.1                 | 12                               |
+|Salmonella enterica       | 10.4                 | 12                               |
+|Lactobacillus fermentum   | 18.4                 | 12                               |
+|Enterococcus faecalis     | 9.9                  | 12                               |
+|Staphylococcus aureus     | 15.5                 | 12                               |
+|Listeria monocytogenes    | 14.1                 | 12                               |
+|Bacillus subtilis         | 17.4                 | 12                               |
+|Saccharomyces cerevisiae  | NA                   | 2                                |
+|Cryptococcus neoformans   | NA                   | 2                                |
+
+
+```{r setup.chunks, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(cache = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(out.extra = '')
+knitr::opts_knit$set(root.dir=".")
+#knitr::opts_chunk$set(fig.pos = 'H')
+```
+
+```{r load.libraries, echo=FALSE, message=FALSE}
+library(ggplot2)
+library(dplyr)
+library(gridExtra)
+library(RColorBrewer)
+library(reshape)
+library(ggrepel)
+library(ggpubr)
+
+# configuration
+source("OCMS_zymoBIOMICS_config.R")
+```
+
+```{r annotations, echo=FALSE, message=FALSE}
+
+# build annotations and abundances depending on the methods and
+# databases that were used in the analysis
+
+#####################################################################
+# NCBI data for 16S analysis
+#####################################################################
+
+anno_ncbi_16s <- data.frame(species = c("Pseudomonas_aeruginosa",
+"Escherichia_coli",
+"Salmonella_enterica",
+"Lactobacillus_fermentum",
+"Enterococcus_faecalis",
+"Staphylococcus_aureus",
+"Listeria_monocytogenes",
+"Bacillus_subtilis"),
+genus = c("Pseudomonas",
+"Escherichia/Shigella",
+"Salmonella",
+"Lactobacillus",
+"Enterococcus",
+"Staphylococcus",
+"Listeria",
+"Bacillus"),
+Expected = c(4.2,
+10.1,
+10.4,
+18.4,
+9.9,
+15.5,
+14.1,
+17.4))
+
+
+#####################################################################
+# GTDB data for 16S analysis
+#####################################################################
+
+anno_gtdb_16s <- data.frame(species = c("Pseudomonas_aeruginosa",
+"Escherichia_flexneri",
+"Salmonella_enterica",
+"Lactobacillus_H_fermentum",
+"Enterococcus_faecalis",
+"Staphylococcus_aureus",
+"Listeria_monocytogenes_B",
+"Bacillus_marinus"),
+genus = c("Pseudomonas",
+"Escherichia",
+"Salmonella",
+"Lactobacillus_H",
+"Enterococcus",
+"Staphylococcus",
+"Listeria",
+"Bacillus"))
+anno_gtdb_16s$Expected <- anno_ncbi_16s$Expected
+
+#####################################################################
+# NCBI data for shotgun
+#####################################################################
+
+anno_ncbi_shotgun <- anno_ncbi_16s
+anno_ncbi_shotgun$Expected <- c(12, 12, 12, 12, 12, 12, 12, 12)
+# add fungi
+fungi <- data.frame(species = c("Saccharomyces cerevisiae", "Cryptococcus neoformans"),
+genus = c("Saccharomyces", "Cryptococcus"),
+Expected = c(2, 2))
+anno_ncbi_shotgun <- bind_rows(anno_ncbi_shotgun, fungi)
+
+#####################################################################
+# GTDB data for shotgun
+#####################################################################
+
+# NB - The fungi aren't present in the GTDB so have to
+# sort the abundances accordingly
+anno_gtdb_shotgun <- anno_gtdb_16s
+gtdb_abundance <- anno_ncbi_shotgun$Expected + 0.5
+anno_gtdb_shotgun$Expected <- gtdb_abundance[1:8]
+```
+
+
+```{r utility_functions, echo=FALSE, message=FALSE}
+
+
+#####################################################################
+#####################################################################
+#####################################################################
+
+relab <- function(counts){
+
+    relab <- (sweep(counts, 2, colSums(counts), "/"))*100
+    return(relab)
+    }
+
+#####################################################################
+#####################################################################
+#####################################################################
+
+truePosRate <- function(relab, annotations, level="species", cutoff=0.01){
+
+    # sort out rownames to match annotations
+    if (level == "species"){
+        shortnames <- unlist(strsplit(rownames(relab), "\\|"))
+        shortnames <- gsub("s__", "", shortnames[seq(7, length(shortnames), 7)])
+        
+        # we can't use unassigned
+        relab <- relab[grep("unassigned", shortnames, invert=TRUE),]
+        shortnames <- shortnames[grep("unassigned", shortnames, invert=TRUE)]
+                
+    }else if (level == "genus"){
+        shortnames <- unlist(strsplit(rownames(relab), "\\|"))
+        shortnames <- gsub("g__", "", shortnames[seq(6, length(shortnames), 7)])
+    }
+    relab <- aggregate(relab, list(shortnames), sum)
+    rownames(relab) <- relab$Group.1
+    relab <- relab[,2:ncol(relab)]
+  
+    # calculate true positive rate
+    result <- list()
+    for (i in 1:ncol(relab)){
+    ab <- data.frame(taxon=rownames(relab), abundance = relab[,i])
+    ab <- ab[ab$abundance >= cutoff,]
+    ab <- ab[order(ab$abundance, decreasing=TRUE),]
+
+    trues <- 0
+    falses <- 0
+    tps <- c()
+    labels <- c()
+    for (j in 1:nrow(ab)){
+        if (ab[j,]$taxon %in% annotations[,level]){
+            trues = trues + 1
+            labels <- append(labels, "TP")
+        }
+        else{
+            falses = falses + 1
+            labels <- append(labels, "FP")
+        }
+        tp <- trues/(trues + falses)
+        tps <- append(tps, tp)
+    }
+    sample <- rep(colnames(relab)[i], length(tps))
+    res <- data.frame(rank = seq(1:length(tps)),
+    true.pos.rate = tps,
+    sample = sample,
+    label = labels
+    )
+    result[[i]] <- res
+    }
+    result <- bind_rows(result)
+}
+
+#####################################################################
+#####################################################################
+#####################################################################
+
+runPCA <- function(df, scale=TRUE){
+
+    pc <- prcomp(t(df), scale=scale)
+    return (pc)
+}
+
+#####################################################################
+#####################################################################
+#####################################################################
+
+getVE <- function(pc, component="PC1"){
+
+    pve <- summary(pc)$importance[,component][[2]]
+    return (pve)
+}
+
+
+#####################################################################
+#####################################################################
+#####################################################################
+
+plotPrincipleComponents <- function(pc, metadata, colourby="none", shapeby="none", group="none", continuous=FALSE,  pcs=c("PC1", "PC2")){
+
+    # covariate must be in same order as pc rownames
+
+    # get variance explained for each component
+    ve1 <- getVE(pc, component=pcs[1])
+    ve2 <- getVE(pc, component=pcs[2])
+
+    ve1 <- round(ve1, 2)*100
+    ve2 <- round(ve2, 2)*100
+
+    # get data frame of components
+    pca <- data.frame(pc$x)
+
+    # add conditions
+    if (colourby == "none"){
+        pca$condition <- "none"}else{
+    pca$condition <- metadata[,colourby]}
+
+    # add shape
+    if (shapeby == "none"){
+        pca$shape <- "none"}else{
+    pca$shape <- metadata[,shapeby]}
+
+    if (group == "none"){
+        pca$group <- "none"}else{
+    pca$group <- metadata[,group]}
+
+    if (continuous==FALSE){
+       pca$condition <- factor(pca$condition, levels=unique(pca$condition))
+    }
+
+    # plot
+    pc1 <- pcs[1]
+    pc2 <- pcs[2]
+
+    # labels
+    xlabel <- paste(pc1, ve1, sep=" (")
+    xlabel <- paste(xlabel, "%", sep="")
+    xlabel <- paste(xlabel, ")", sep="")
+    ylabel <- paste(pc2, ve2, sep=" (")
+    ylabel <- paste(ylabel, "%", sep="")	
+    ylabel <- paste(ylabel, ")", sep="")
+
+    n <- length(unique(pca$condition))
+    colours <- rainbow(n, s=0.7, v=0.6)
+    
+    plot1 <- ggplot(pca, aes_string(x=pc1, y=pc2, group="group", colour="condition", shape="shape"))
+    plot2 <- plot1 + geom_point(size=5, alpha=0.8)
+    plot3 <- plot2 + theme_bw() 
+    plot4 <- plot3 + xlab(xlabel) + ylab(ylabel)
+    if (continuous==TRUE){
+        plot4 <- plot4 + scale_colour_gradient()}
+    else{
+        plot4 <- plot4 + scale_colour_manual(values=colours)
+	}
+    return(plot4) 
+}
+
+```
+
+```{r choose.annotations, echo=FALSE, message=FALSE}
+
+if (annotations == "NCBI" & sequence_type == "16S"){
+annotations = anno_ncbi_16s}else if (annotations == "GTDB" & sequence_type == "16S"){
+annotations = anno_gtdb_16s}else if (annotations == "NCBI" & sequence_type == "shotgun"){
+annotations = anno_ncbi_shotgun}else if (annotations == "GTDB" & sequence_type == "shotgun"){
+annotations = anno_gtdb_shotgun}
+
+```
+
+```{r read.data, echo=FALSE, message=FALSE}
+
+counts <- read.csv(counts_table, header=TRUE, stringsAsFactors=FALSE, sep="\t", row.names=1)
+
+# If it's 16S data then need to sub the ";" with "|" and change NA to unassigned
+if (sequence_type == "16S"){
+    rownames(counts) <- gsub("__-", "unassigned", gsub("__NA", "unassigned", gsub(";", "\\|", rownames(counts))))
+    rownames(counts) <- gsub("\\(.*", "", rownames(counts))}
+
+
+# subset based on column names
+counts_2 <- data.frame(counts[,standards_columns],counts[,standards_columns])
+rownames(counts_2) <- rownames(counts)
+counts <- counts_2
+relabundance <- relab(counts)
+#relabundance <- data.frame(relabundance[,1])
+
+```
+
+
+## Considerations
+
+If you are using 16S data then it is prudent to just consider the genus assignments as species assignments are known to be fairly inaccurate.
+
+# True positive rate
+
+Below is a plot of the true positive rate (ordered by abundance high -> low).  
+
+## Species
+
+```{r tp.rate.se, echo=FALSE, message=FALSE, fig.height=5, fig.width=10}
+
+tp.rate.sp <- truePosRate(relabundance, annotations, level="species", cutoff=species_cutoff)
+ggplot(tp.rate.sp, aes(x=rank, y=true.pos.rate, colour=label, group=sample)) + geom_point() + theme_bw() + ylab("TP / (TP + FP)") + scale_colour_manual(values=c("grey", "purple")) + facet_wrap(~sample, scale="free")
+```
+
+
+## Genus
+
+```{r tp.rate.ge, echo=FALSE, message=FALSE, fig.height=5, fig.width=10}
+colnames(relabundance) <- c("ZymoBIOMICS_Standard", "ZymoBIOMICS_Standard_rep")
+tp.rate.ge <- truePosRate(relabundance, annotations, level="genus", cutoff=genus_cutoff)
+ggplot(tp.rate.ge, aes(x=rank, y=true.pos.rate, colour=label, group=sample)) + geom_point() + theme_bw() + ylab("TP / (TP + FP)") + scale_colour_manual(values=c("grey", "purple")) + facet_wrap(~sample, scale="free")
+```
+
+
+# Composition analysis
+
+It is useful to visualise how the predicted composition of the standards compares with the expected composition. Below we plot this at species and genus levels.
+
+## Species
+
+```{r composition.species, echo=FALSE, message=FALSE, fig.height=5, fig.width=7}
+
+toplot.sp <- relabundance
+species <- unlist(strsplit(rownames(toplot.sp), "\\|"))
+species <- gsub("s__", "", species[seq(7, length(species),7)])
+toplot.sp <- aggregate(toplot.sp, list(species), sum)
+rownames(toplot.sp) <- toplot.sp$Group.1
+toplot.sp <- toplot.sp[,2:ncol(toplot.sp)]
+toplot.sp$species <- rownames(toplot.sp)
+
+known.sp <- merge(annotations, toplot.sp, by.x="species", by.y="species", all.x=TRUE, all.y=FALSE)
+known.sp[is.na(known.sp)] <- 0
+
+
+# set up colours
+colours.sp <- brewer.pal(n=nrow(known.sp), name = "Set3")
+known.sp.m <- melt(known.sp)
+known.sp.m$variable <- factor(known.sp.m$variable, levels=colnames(known.sp[3:ncol(known.sp)]))
+
+ggplot(known.sp.m, aes(x=variable, y=value, fill=species)) + geom_bar(stat="identity") + theme_bw() + scale_fill_manual(values=colours.sp) + xlab("") + ylab("% reads") + theme(axis.text.x=element_text(angle=45, vjust=1, hjust=1))
+```
+
+## Genus
+
+```{r composition.genus, echo=FALSE, message=FALSE, fig.height=5, fig.width=7}
+
+toplot.ge <- relabundance
+genus <- unlist(strsplit(rownames(toplot.ge), "\\|"))
+genus <- gsub("g__", "", genus[seq(6, length(genus),7)])
+toplot.ge <- aggregate(toplot.ge, list(genus), sum)
+rownames(toplot.ge) <- toplot.ge$Group.1
+toplot.ge <- toplot.ge[,2:ncol(toplot.ge)]
+toplot.ge$genus <- rownames(toplot.ge)
+known.ge <- merge(annotations, toplot.ge, by.x="genus", by.y="genus", all.x=TRUE, all.y=FALSE)
+
+# Proportion of reads that are attributed to non-standards bacteria
+sum_prop_not <- sum(toplot.ge[!toplot.ge$genus %in% annotations$genus,]$ZymoBIOMICS_Standard)
+
+# set up colours
+colours.ge <- brewer.pal(n=nrow(known.ge), name = "Set3")
+known.ge.m <- melt(known.ge)
+known.ge.m$variable <- factor(known.ge.m$variable, levels=colnames(known.ge[3:ncol(known.ge)]))
+
+ggplot(known.ge.m[known.ge.m$variable != "ZymoBIOMICS_Standard_rep",], aes(x=variable, y=value, fill=genus)) + geom_bar(stat="identity") + theme_bw() + scale_fill_manual(values=colours.ge) + xlab("") + ylab("% reads") + theme(axis.text.x=element_text(angle=45, vjust=1, hjust=1))
+
+```
+
+The total proportion of reads that could be assigned to known members in the ZymoBIOMICS community is `r 100 - sum_prop_not`.
+
+# Correlation analysis
+
+In addition to visualising the composition it is interesting to look at the correlations between taxa abundances and expected taxa abundances. Note that correlation analyis does not make much sense for shotgun data as all of the bacterial species are at an equal abundance.
+
+## Species
+
+```{r correlation.species, echo=FALSE, message=FALSE, fig.height=10, fig.width=10}
+grobs.sp <- list()
+for (i in 4:ncol(known.sp)){
+sample <- colnames(known.sp)[i]
+dat <- data.frame(species=known.sp$species,
+                  Expected = known.sp$Expected)
+dat[,sample] <- unlist(known.sp[,i])
+p <- ggplot(dat, aes_string(x=sample, y="Expected")) + geom_point() + theme_bw() + stat_smooth(method="lm") + geom_label_repel(label=dat$species) + stat_cor()
+grobs.sp[[i-3]] <- p
+}
+grid.arrange(grobs=grobs.sp, ncol=2)
+
+```
+
+
+## Genus
+
+```{r correlation.genus, echo=FALSE, message=FALSE, fig.height=10, fig.width=10}
+grobs.ge <- list()
+for (i in 4:ncol(known.ge)){
+sample <- colnames(known.ge)[i]
+dat <- data.frame(genus=known.ge$genus,
+                  Expected = known.ge$Expected)
+dat[,sample] <- unlist(known.ge[,i])
+p <- ggplot(dat, aes_string(x=sample, y="Expected")) + geom_point() + theme_bw() + stat_smooth(method="lm") + geom_label_repel(label=dat$genus) + stat_cor()
+grobs.ge[[i-3]] <- p
+}
+grid.arrange(grobs=grobs.ge, ncol=2)
+
+```
+
+# Principle components analysis
+
+If there are multiple standards samples it may be of interest to see how well each sample clusters with the expected values. This analysis is performed below at each level (species and genus).
+
+## Species
+
+```{r pca.sp, echo=FALSE, message=FALSE, fig.height=5, fig.width=6}
+
+relab.sp <- merge(annotations, toplot.sp, by.x="species", by.y="species", all.x=TRUE, all.y=FALSE)
+relab.sp[is.na(relab.sp)] <- 0
+rownames(relab.sp) <- relab.sp$species
+relab.sp <- relab.sp[,c(3:ncol(relab.sp))]
+relab.sp <- log10(relab.sp + 1E-6)
+
+pc.sp <- runPCA(relab.sp, scale=FALSE)
+metadata.sp <- data.frame(sample=colnames(relab.sp), group=colnames(relab.sp))
+plotPrincipleComponents(pc.sp, metadata.sp, colourby="group") + scale_colour_manual(values=brewer.pal(ncol(relab.sp), "Set3"))
+
+```
+
+## Genus
+
+```{r pca.ge, echo=FALSE, message=FALSE, fig.height=5, fig.width=6}
+
+# something strange about objects not being able to pass
+# between chunks with rmarkdown. Need to look into this
+# this is a repeat from a previous chunk
+toplot.ge <- relabundance
+genus <- unlist(strsplit(rownames(toplot.ge), "\\|"))
+genus <- gsub("g__", "", genus[seq(6, length(genus),7)])
+toplot.ge <- aggregate(toplot.ge, list(genus), sum)
+rownames(toplot.ge) <- toplot.ge$Group.1
+toplot.ge <- toplot.ge[,2:ncol(toplot.ge)]
+toplot.ge$genus <- rownames(toplot.ge)
+
+relab.ge <- merge(annotations, toplot.ge, by.x="genus", by.y="genus", all.x=TRUE, all.y=FALSE)
+relab.ge[is.na(relab.ge)] <- 0
+rownames(relab.ge) <- relab.ge$genus
+relab.ge <- relab.ge[,c(3:ncol(relab.ge))]
+relab.ge <- log10(relab.ge + 1E-6)
+
+pc.ge <- runPCA(relab.ge, scale=FALSE)
+metadata.ge <- data.frame(sample=colnames(relab.ge), group=colnames(relab.ge))
+plotPrincipleComponents(pc.ge, metadata.ge, colourby="group") + scale_colour_manual(values=brewer.pal(ncol(relab.ge), "Set3"))
+
+```
